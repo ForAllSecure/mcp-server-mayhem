@@ -479,6 +479,35 @@ async def mapi_run(args: RunArgs, ctx: Context | None = None) -> str:
         raise RuntimeError(str(e)) from None
 
 
+# -----------------------------
+# Pydantic schema for `mapi target list`
+# -----------------------------
+class TargetListArgs(BaseModel):
+    show_dates: bool = Field(False, description="--show-dates: display the date each target was added and last updated")
+    max_items: int = Field(100, ge=1, description="--max-items <int>: maximum number of targets to return (default: 100)")
+
+
+# -----------------------------
+# MCP tool for `mapi target list`
+# -----------------------------
+@mcp.tool(
+    description="""
+    List the mapi targets registered for the current user account.
+    Returns a table of project/target pairs available for scanning with `mapi run`.
+    Use this to discover existing targets before starting a new scan.
+    """
+)
+async def mapi_target_list(args: TargetListArgs, ctx: Context | None = None) -> str:
+    cmd: list[str] = [MAPI_BIN, "target", "list"]
+    _add_flag(cmd, args.show_dates, "--show-dates")
+    _add_opt(cmd, "--max-items", args.max_items)
+    log.info("Running: %s", " ".join(cmd))
+    try:
+        return await run_cli(cmd, ctx=ctx)
+    except CLIRuntimeError as e:
+        raise RuntimeError(str(e)) from None
+
+
 @mcp.tool(description="Execute arbitrary bash commands on the MAPI server host - this is useful to inspect or manipulate mapi findings.")
 async def bash(command: str, cwd: str | None = None) -> str:
     """Execute bash commands.
