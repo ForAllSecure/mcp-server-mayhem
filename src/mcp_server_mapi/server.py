@@ -8,7 +8,7 @@ import logging
 from typing import Literal, List, Optional
 
 from pydantic import BaseModel, Field, model_validator, field_validator
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 
 # --- Logging: IMPORTANT ---
 # Never write to stdout on stdio servers (keeps JSON-RPC clean).
@@ -143,7 +143,7 @@ def parse_duration(raw: str) -> float:
 
     """
 )
-async def mapi_discover(args: DiscoverArgs) -> str:
+async def mapi_discover(args: DiscoverArgs, ctx: Context | None = None) -> str:
     cmd: list[str] = [MAPI_BIN, "discover"]
 
     # FLAGS
@@ -213,8 +213,8 @@ async def mapi_discover(args: DiscoverArgs) -> str:
     # Run it
     log.info("Running: %s", " ".join(cmd))
     try:
-        return await run_cli(cmd, timeout_s=600.0)
-    except CLIRuntimeError as e:  # only raised on timeout, not non-zero exit
+        return await run_cli(cmd, timeout_s=600.0, ctx=ctx)
+    except CLIRuntimeError as e:
         raise RuntimeError(str(e)) from None
 
 
@@ -365,7 +365,7 @@ class RunArgs(BaseModel):
     report at the end.
     """
 )
-async def mapi_run(args: RunArgs) -> str:
+async def mapi_run(args: RunArgs, ctx: Context | None = None) -> str:
     cmd: list[str] = [MAPI_BIN, "run"]
 
     # first, the required positionals:
@@ -472,8 +472,10 @@ async def mapi_run(args: RunArgs) -> str:
 
     log.info("Running: %s", " ".join(cmd))
     try:
-        return await run_cli(cmd, timeout_s=args.process_timeout)
-    except CLIRuntimeError as e:  # only raised on timeout, not non-zero exit
+        return await run_cli(cmd, timeout_s=args.process_timeout, ctx=ctx)
+    except CLIRuntimeError as e:
+        if e.exit_code == 1:
+            return e.stdout
         raise RuntimeError(str(e)) from None
 
 
