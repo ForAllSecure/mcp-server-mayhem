@@ -1,11 +1,13 @@
 from __future__ import annotations
 from pathlib import Path
 import asyncio
+import json
 import os
 import re
 import sys
 import logging
 from typing import Literal, List, Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, model_validator, field_validator
 from mcp.server.fastmcp import FastMCP, Context
@@ -506,6 +508,576 @@ async def mapi_target_list(args: TargetListArgs, ctx: Context | None = None) -> 
         return await run_cli(cmd, ctx=ctx)
     except CLIRuntimeError as e:
         raise RuntimeError(str(e)) from None
+
+
+# -----------------------------
+# Helpers for evaluate_scan_quality
+# -----------------------------
+def _spec_path_regex(spec_path: str) -> re.Pattern:
+    """Compile a spec path with {param} placeholders into a regex for HAR path matching."""
+    parts = spec_path.split("/")
+    pattern_parts = []
+    for part in parts:
+        if part.startswith("{") and part.endswith("}"):
+            pattern_parts.append("[^/]+")
+        elif part:
+            pattern_parts.append(re.escape(part))
+    pattern = "/".join(pattern_parts)
+    return re.compile(f"(?:^|/){pattern}(?:/|$)")
+
+
+# -----------------------------
+# Pydantic schema for evaluate_scan_quality
+# -----------------------------
+class EvaluateScanQualityArgs(BaseModel):
+    scan_output: str = Field(..., description="stdout captured from mapi run")
+    har_path: str = Field(..., description="filesystem path to the HAR file produced by the scan (requires --har <path> on the mapi run invocation)")
+    spec_path: str = Field(..., description="filesystem path to the OpenAPI/Swagger/Postman spec used for the scan")
+
+
+# -----------------------------
+# MCP tool: evaluate_scan_quality
+# -----------------------------
+@mcp.tool(
+    description="""
+    Evaluate the quality of a completed mapi scan by parsing the HAR file and API spec.
+    Returns a JSON string with endpoint coverage percentage, auth hints extracted from
+    401/403 responses, and per-endpoint request/2xx/status stats.
+    Use this after mapi_run to decide whether to tune scan parameters further.
+    Requires the scan to have been run with --har <path> to produce a HAR file.
+    """
+)
+async def evaluate_scan_quality(args: EvaluateScanQualityArgs, ctx: Context | None = None) -> str:
+    # 1. Extract spec endpoints via mapi describe specification
+    try:
+        spec_output = await run_cli(
+            [MAPI_BIN, "describe", "specification", args.spec_path],
+            timeout_s=30.0,
+        )
+    except CLIRuntimeError as e:
+        raise RuntimeError(str(e)) from None
+
+    seen: set[tuple[str, str]] = set()
+    spec_endpoints: list[tuple[str, str]] = []
+    for line in spec_output.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            key = (parts[0].upper(), parts[1])
+            if key not in seen:
+                seen.add(key)
+                spec_endpoints.append(key)
+
+    # Compile path matchers for each unique spec endpoint
+    spec_patterns = [(m, p, _spec_path_regex(p)) for m, p in spec_endpoints]
+
+    # 2. Parse HAR
+    har_file = Path(args.har_path)
+    if not har_file.exists():
+        raise RuntimeError(f"HAR file not found: {args.har_path}")
+    try:
+        har = json.loads(har_file.read_text())
+        entries = har.get("log", {}).get("entries", [])
+    except (json.JSONDecodeError, KeyError) as e:
+        raise RuntimeError(f"Failed to parse HAR file: {e}") from None
+
+    # 3. Per-endpoint stats
+    stats: dict[tuple[str, str], dict] = {
+        (m, p): {"request_count": 0, "ok_count": 0, "status_breakdown": {}}
+        for m, p in spec_endpoints
+    }
+    auth_hints_set: set[str] = set()
+    total_requests = len(entries)
+
+    for entry in entries:
+        req = entry.get("request", {})
+        resp = entry.get("response", {})
+        method = req.get("method", "").upper()
+        raw_url = req.get("url", "")
+        status = resp.get("status", 0)
+        path = urlparse(raw_url).path
+
+        # Collect WWW-Authenticate hints from 401/403 responses
+        if status in (401, 403):
+            for hdr in resp.get("headers", []):
+                if hdr.get("name", "").lower() == "www-authenticate":
+                    val = hdr.get("value", "").strip()
+                    if val:
+                        auth_hints_set.add(val)
+
+        # Match to best-fitting spec endpoint
+        for spec_method, spec_path, pattern in spec_patterns:
+            if spec_method == method and pattern.search(path):
+                key = (spec_method, spec_path)
+                stats[key]["request_count"] += 1
+                if 200 <= status < 300:
+                    stats[key]["ok_count"] += 1
+                s_key = str(status)
+                stats[key]["status_breakdown"][s_key] = (
+                    stats[key]["status_breakdown"].get(s_key, 0) + 1
+                )
+                break
+
+    # 4. Coverage: endpoints that received at least one 2xx response
+    endpoints_with_2xx = sum(1 for v in stats.values() if v["ok_count"] > 0)
+    total = len(spec_endpoints)
+    covered_pct = round(endpoints_with_2xx / total * 100, 1) if total > 0 else 0.0
+
+    # 5. Unreachable endpoints flagged by mapi ([C] in scan output)
+    unreachable = [
+        line.strip()
+        for line in args.scan_output.splitlines()
+        if "[C]" in line
+    ]
+
+    # 6. Filtered scan output summary
+    _summary_kw = {"[c]", "error", "duration", "coverage", "auth", "fail", "time limit"}
+    summary_lines = [
+        line for line in args.scan_output.splitlines()
+        if any(kw in line.lower() for kw in _summary_kw)
+    ]
+
+    endpoint_stats = [
+        {
+            "method": m,
+            "path": p,
+            "request_count": stats[(m, p)]["request_count"],
+            "ok_count": stats[(m, p)]["ok_count"],
+            "status_breakdown": stats[(m, p)]["status_breakdown"],
+        }
+        for m, p in spec_endpoints
+    ]
+
+    return json.dumps({
+        "total_endpoints": total,
+        "covered_pct": covered_pct,
+        "total_requests": total_requests,
+        "auth_hints": sorted(auth_hints_set),
+        "unreachable_endpoints": unreachable,
+        "endpoint_stats": endpoint_stats,
+        "scan_output_summary": "\n".join(summary_lines[:20]),
+    }, indent=2)
+
+
+# -----------------------------
+# Pydantic schema for emit_scan_script
+# -----------------------------
+class EmitScanScriptArgs(BaseModel):
+    api_target: str = Field(..., description="project/target name (e.g., 'myproject/api')")
+    duration: str = Field(..., description="scan duration (e.g., '30s', '2m', '10m')")
+    specification: str = Field(..., description="path to the OpenAPI/Swagger/Postman spec file")
+    url: str = Field(..., description="base URL for the API (e.g., 'https://localhost:8000')")
+    output_path: str = Field(..., description="filesystem path to write the script; overwrites if already exists")
+    extra_flags: List[str] = Field(default_factory=list, description="additional mapi run flags in argv order (e.g., ['--header-auth', 'Authorization: Bearer ${MAPI_TOKEN}'])")
+    har_output_path: str = Field("scan.har", description="path for the --har output file embedded in the script (default: scan.har)")
+
+
+# -----------------------------
+# MCP tool: emit_scan_script
+# -----------------------------
+@mcp.tool(
+    description="""
+    Write a parameterized bash script wrapping the final tuned mapi run invocation.
+    The script uses set -euo pipefail and validates required environment variables at startup.
+    Pass auth credentials as ${ENV_VAR} references in extra_flags — never inline secrets.
+    Overwrites output_path if it already exists. Returns the path the script was written to.
+    """
+)
+def emit_scan_script(args: EmitScanScriptArgs) -> str:
+    # Detect ${VAR_NAME} references in extra_flags for env-var guards
+    _var_re = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+    seen_vars: set[str] = set()
+    extra_vars: list[str] = []
+    for flag in args.extra_flags:
+        for var in _var_re.findall(flag):
+            if var != "MAYHEM_TOKEN" and var not in seen_vars:
+                seen_vars.add(var)
+                extra_vars.append(var)
+
+    env_guards = [': "${MAYHEM_TOKEN:?MAYHEM_TOKEN must be set}"']
+    for var in extra_vars:
+        env_guards.append(f': "${{{var}:?{var} must be set}}"')
+
+    # Build mapi run invocation with backslash continuation
+    all_flags = args.extra_flags
+    positional_and_opts = [
+        f"  {args.api_target} \\",
+        f"  {args.duration} \\",
+        f"  {args.specification} \\",
+        f"  --url {args.url} \\",
+        f"  --har {args.har_output_path}",
+    ]
+    if all_flags:
+        positional_and_opts[-1] += " \\"
+        for i, flag in enumerate(all_flags):
+            suffix = " \\" if i < len(all_flags) - 1 else ""
+            positional_and_opts.append(f"  {flag}{suffix}")
+
+    script = "\n".join([
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        *env_guards,
+        "",
+        "mapi run \\",
+        *positional_and_opts,
+        "",
+    ])
+
+    Path(args.output_path).write_text(script)
+    os.chmod(args.output_path, 0o755)
+    return f"Script written to {args.output_path}"
+
+
+# -----------------------------
+# Heuristic rule helpers for suggest_tune_changes
+# -----------------------------
+def _rule_auth(quality: dict, current: dict) -> dict | None:
+    """Rule 1: auth failure signal → suggest auth flags."""
+    auth_hints = quality.get("auth_hints", [])
+    summary = quality.get("scan_output_summary", "").lower()
+    auth_signal = bool(auth_hints) or any(
+        kw in summary for kw in ("auth", "401", "403", "unauthorized", "forbidden")
+    )
+    if not auth_signal:
+        return None
+    if current.get("header_auth") or current.get("basic_auth") or current.get("cookie_auth"):
+        return None  # auth flag already set
+    hint_text = " ".join(auth_hints).lower()
+    if "basic" in hint_text:
+        flag, value = "--basic-auth", "${MAPI_USER}:${MAPI_PASS}"
+    else:
+        flag, value = "--header-auth", "Authorization: Bearer ${MAPI_TOKEN}"
+    return {
+        "flag": flag,
+        "value": value,
+        "reason": "Auth failure detected — 401/403 responses or auth error in scan output",
+        "warning": None,
+    }
+
+
+def _rule_min_requests(quality: dict, current: dict, min_covered_pct: int) -> dict | None:
+    """Rule 2: low coverage + not duration-limited → raise --min-request-count."""
+    covered_pct = quality.get("covered_pct", 0)
+    summary = quality.get("scan_output_summary", "").lower()
+    if covered_pct >= min_covered_pct:
+        return None
+    if "duration" in summary or "time limit" in summary:
+        return None  # duration-limited case handled by Rule 3
+    total_endpoints = max(quality.get("total_endpoints", 1), 1)
+    suggested = max(50, total_endpoints * 20)
+    current_min = current.get("min_request_count")
+    if current_min and int(current_min) >= suggested:
+        return None
+    return {
+        "flag": "--min-request-count",
+        "value": str(suggested),
+        "reason": f"Low endpoint coverage ({covered_pct}%) with time remaining — increase per-endpoint request budget",
+        "warning": None,
+    }
+
+
+def _rule_duration(quality: dict, current: dict, min_covered_pct: int) -> dict | None:
+    """Rule 3: low coverage + duration-limited → increase duration."""
+    covered_pct = quality.get("covered_pct", 0)
+    summary = quality.get("scan_output_summary", "").lower()
+    if covered_pct >= min_covered_pct:
+        return None
+    if "duration" not in summary and "time limit" not in summary:
+        return None
+    current_duration = current.get("duration", "30s")
+    if current_duration == "auto":
+        return None
+    try:
+        secs = parse_duration(current_duration)
+    except ValueError:
+        return None
+    doubled = secs * 2
+    if doubled >= 3600:
+        next_dur = f"{int(doubled / 3600)}h"
+    elif doubled >= 60:
+        next_dur = f"{int(doubled / 60)}m"
+    else:
+        next_dur = f"{int(doubled)}s"
+    if current_duration == next_dur:
+        return None
+    return {
+        "flag": "duration",
+        "value": next_dur,
+        "reason": f"Low endpoint coverage ({covered_pct}%) and scan hit time limit — increase duration from {current_duration} to {next_dur}",
+        "warning": None,
+    }
+
+
+def _rule_ignore_endpoint(quality: dict, current: dict, iteration: int) -> dict | None:
+    """Rule 4: chronically 5xx endpoint → --ignore-endpoint with narrowing warning."""
+    if iteration < 2:
+        return None
+    existing_ignores = current.get("ignore_endpoint", [])
+    for ep in quality.get("endpoint_stats", []):
+        count = ep.get("request_count", 0)
+        ok = ep.get("ok_count", 0)
+        if count < 10 or ok > 0:
+            continue
+        breakdown = ep.get("status_breakdown", {})
+        five_xx = sum(v for k, v in breakdown.items() if k.startswith("5"))
+        if count > 0 and five_xx / count > 0.8:
+            target = f"{ep['method']}:{ep['path']}"
+            if target in existing_ignores:
+                continue
+            return {
+                "flag": "--ignore-endpoint",
+                "value": target,
+                "reason": f"{ep['method']} {ep['path']} returned 5xx on {five_xx}/{count} attempts with 0 successes",
+                "warning": "[FUZZING NARROWING WARNING] Ignoring this endpoint reduces the fuzzer's attack surface. Confirm this endpoint is intentionally excluded before applying.",
+            }
+    return None
+
+
+def _rule_validation_errors(quality: dict, min_covered_pct: int) -> dict | None:
+    """Rule 5: high 400/422 rate → informational note about resource hints."""
+    total = quality.get("total_requests", 0)
+    covered_pct = quality.get("covered_pct", 0)
+    if total == 0 or covered_pct < min_covered_pct / 2:
+        return None
+    val_errors = sum(
+        ep.get("status_breakdown", {}).get("400", 0) + ep.get("status_breakdown", {}).get("422", 0)
+        for ep in quality.get("endpoint_stats", [])
+    )
+    if val_errors / total <= 0.4:
+        return None
+    return {
+        "flag": None,
+        "value": None,
+        "reason": (
+            f"High validation-error rate ({val_errors}/{total} requests returned 400/422). "
+            "Resource hints can seed valid parameter values — support coming in Capability 2."
+        ),
+        "warning": None,
+    }
+
+
+# -----------------------------
+# Pydantic schema for suggest_tune_changes
+# -----------------------------
+class SuggestTuneChangesArgs(BaseModel):
+    quality_json: str = Field(..., description="JSON string returned by evaluate_scan_quality")
+    current_args_json: str = Field(..., description="JSON object of the current mapi run arguments (keys match RunArgs fields, e.g. {\"duration\": \"30s\", \"header_auth\": []})")
+    iteration: int = Field(1, ge=1, description="current tune-loop iteration number (1-indexed)")
+    min_covered_pct: int = Field(25, ge=1, le=100, description="minimum % of spec endpoints with ≥1 2xx response to consider the scan good (default: 25)")
+
+
+# -----------------------------
+# MCP tool: suggest_tune_changes
+# -----------------------------
+@mcp.tool(
+    description="""
+    Analyze mapi scan quality metrics and suggest flag changes to improve coverage.
+    Applies 6 deterministic heuristic rules in priority order.
+    Returns a JSON object with a suggestions list, exhausted flag, and rationale.
+    Rule 4 (--ignore-endpoint suggestions) always carries a [FUZZING NARROWING WARNING] —
+    present this warning to the user and require explicit approval before applying.
+    When exhausted=true, quality thresholds are met or heuristics are exhausted.
+    """
+)
+def suggest_tune_changes(args: SuggestTuneChangesArgs) -> str:
+    try:
+        quality = json.loads(args.quality_json)
+        current = json.loads(args.current_args_json)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid JSON input: {e}") from None
+
+    covered_pct = quality.get("covered_pct", 0)
+
+    # Rule 6: convergence check — fast exit if threshold met
+    if covered_pct >= args.min_covered_pct:
+        return json.dumps({
+            "suggestions": [],
+            "exhausted": True,
+            "rationale": f"Quality threshold met — coverage {covered_pct}% ≥ {args.min_covered_pct}%. Ready to emit scan script.",
+        }, indent=2)
+
+    # Rules 1–5
+    suggestions = [
+        s for s in [
+            _rule_auth(quality, current),
+            _rule_min_requests(quality, current, args.min_covered_pct),
+            _rule_duration(quality, current, args.min_covered_pct),
+            _rule_ignore_endpoint(quality, current, args.iteration),
+            _rule_validation_errors(quality, args.min_covered_pct),
+        ]
+        if s is not None
+    ]
+
+    # LLM fallback: no new actionable suggestions after 3+ iterations
+    actionable = [s for s in suggestions if s.get("flag") is not None]
+    if args.iteration >= 3 and not actionable:
+        return json.dumps({
+            "suggestions": suggestions,
+            "exhausted": True,
+            "rationale": (
+                f"Heuristic suggestions exhausted after {args.iteration} iterations. "
+                "LLM should evaluate the quality data and propose alternative strategies, "
+                "or accept the current configuration."
+            ),
+        }, indent=2)
+
+    rationale = (
+        f"{len(suggestions)} suggestion(s) generated. "
+        f"Coverage: {covered_pct}% (threshold: {args.min_covered_pct}%)."
+        if suggestions
+        else f"No applicable heuristics triggered. Coverage: {covered_pct}% (threshold: {args.min_covered_pct}%)."
+    )
+    return json.dumps({
+        "suggestions": suggestions,
+        "exhausted": False,
+        "rationale": rationale,
+    }, indent=2)
+
+
+# -----------------------------
+# MCP prompt: onboard-mapi-scan
+# -----------------------------
+@mcp.prompt(
+    name="onboard-mapi-scan",
+    description="Orchestrate the mapi onboarding and tune loop: walk through setup, run a scan, evaluate quality, suggest tuning changes, and emit a final leave-behind scan script.",
+)
+async def onboard_mapi_scan(
+    api_target: str,
+    specification: str,
+    url: str,
+    duration: str = "30s",
+    max_iterations: int = 3,
+    min_covered_pct: int = 25,
+) -> str:
+    har_path = f"/tmp/mapi-onboard-{api_target.replace('/', '-')}.har"
+    script_path = f"./mapi-scan-{api_target.replace('/', '-')}.sh"
+    return f"""You are following the mapi onboarding and tune loop for target `{api_target}`.
+Complete each step in order. Surface progress to the user as you go.
+
+**Scan parameters:**
+- api_target: {api_target}
+- specification: {specification}
+- url: {url}
+- duration: {duration} (initial — may change after tuning)
+- max_iterations: {max_iterations}
+- min_covered_pct: {min_covered_pct}%
+- HAR output path: {har_path}
+
+---
+
+## Step 1 — Verify environment
+
+Call `mapi_target_list` with default arguments (empty TargetListArgs).
+Confirm the response lists at least one target and contains no authentication error.
+If the call fails or MAYHEM_TOKEN appears unset, tell the user and stop.
+
+## Step 2 — Confirm spec file
+
+Call `read_file("{specification}")` to read the first lines of the spec.
+Confirm the file exists and looks like an OpenAPI/Swagger/Postman spec.
+If the file is missing or unreadable, tell the user and stop.
+
+## Step 3 — Run initial scan
+
+Call `mapi_run` with these arguments:
+  api_target = "{api_target}"
+  duration = "{duration}"
+  specification = "{specification}"
+  url = "{url}"
+  har = "{har_path}"
+
+Capture the full output as `scan_output`.
+A non-zero mapi exit (exit code 1 = findings present) is normal — the output is still returned.
+Exit codes 2 or 3 indicate real errors — surface them to the user and stop.
+
+## Step 4 — Evaluate quality
+
+Call `evaluate_scan_quality` with:
+  scan_output = <full output from Step 3>
+  har_path = "{har_path}"
+  spec_path = "{specification}"
+
+Parse the returned JSON and show the user:
+- covered_pct (% of spec endpoints with at least one 2xx response)
+- total_endpoints and total_requests
+- auth_hints (if non-empty — these indicate auth is blocking the fuzzer)
+- unreachable_endpoints (if non-empty)
+
+Store this quality JSON for Step 5.
+
+## Step 5 — Tune loop (up to {max_iterations} total scan iterations)
+
+Maintain `current_args` as a JSON object tracking the mapi_run arguments in use.
+Start with: {{"api_target": "{api_target}", "duration": "{duration}", "specification": "{specification}", "url": "{url}"}}
+Update it after each iteration when suggestions are applied.
+
+The initial scan (Step 3) is iteration 1. For each subsequent iteration:
+
+  a. Call `suggest_tune_changes` with:
+       quality_json       = <JSON string from the most recent evaluate_scan_quality>
+       current_args_json  = <JSON string of current_args>
+       iteration          = <current iteration number>
+       min_covered_pct    = {min_covered_pct}
+
+  b. If `exhausted == true` OR iteration >= {max_iterations}: proceed to Step 6.
+
+  c. Present each suggestion to the user (flag, value, reason).
+     **If any suggestion has a non-null `warning` field containing "[FUZZING NARROWING WARNING]":
+     display the warning prominently and ask the user explicitly:
+     "Apply --ignore-endpoint for <endpoint>? (yes/no)"
+     Do NOT apply the suggestion without an explicit yes.**
+
+  d. Apply all approved suggestions to current_args:
+     - If flag is "duration": update the duration value in current_args.
+     - If flag starts with "--": add or update the corresponding snake_case field in current_args
+       (e.g., "--header-auth" → "header_auth", "--min-request-count" → "min_request_count").
+     - If flag is null (informational): note it to the user, no change to current_args.
+
+  e. Run the next scan: call `mapi_run` with the updated current_args, keeping
+     har = "{har_path}". Capture the full output as scan_output.
+
+  f. Call `evaluate_scan_quality` again with the new scan_output,
+     har_path = "{har_path}", spec_path = "{specification}".
+     Show the updated covered_pct and request count to the user.
+     Increment the iteration counter and return to step (a).
+
+## Step 6 — Emit scan script
+
+Call `emit_scan_script` with:
+  api_target      = "{api_target}"
+  duration        = <final duration from current_args>
+  specification   = "{specification}"
+  url             = "{url}"
+  output_path     = "{script_path}"
+  har_output_path = "{har_path}"
+  extra_flags     = <list of flag-value pairs from current_args that are not positional args,
+                    in argv order — e.g. ["--header-auth", "Authorization: Bearer ${{MAPI_TOKEN}}",
+                    "--min-request-count", "200"]>
+
+Confirm the script was written and show the user the output path.
+
+## Step 7 — Summary
+
+Present a final summary to the user:
+1. Final quality metrics from the last evaluate_scan_quality: covered_pct, total_endpoints, total_requests.
+2. Path to the emitted script: `{script_path}`
+3. How many iterations ran and what changed between them.
+4. Any endpoints that remained unreachable (unreachable_endpoints from the last quality JSON).
+5. If covered_pct < {min_covered_pct}% after {max_iterations} iterations:
+   note that thresholds were not met and suggest the user review the script manually or
+   run the loop again with a longer duration or higher max_iterations.
+
+---
+
+**Important implementation notes:**
+- Always pass `har = "{har_path}"` to every mapi_run call. Without it, evaluate_scan_quality
+  cannot parse the HAR and will fail.
+- RunArgs has a `har` field directly — do not use extra_flags for the HAR path.
+- The `current_args_json` for suggest_tune_changes should use Python-style snake_case key names
+  matching RunArgs fields (e.g., "header_auth", "min_request_count", "duration").
+- emit_scan_script's extra_flags takes argv-order tokens (["--flag", "value", ...]),
+  not a dict. Construct this list from current_args before calling emit_scan_script.
+"""
 
 
 @mcp.tool(description="Execute arbitrary bash commands on the MAPI server host - this is useful to inspect or manipulate mapi findings.")
