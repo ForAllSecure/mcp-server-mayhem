@@ -21,6 +21,44 @@ Discover APIs running on a single host, multiple hosts, CIDR blocks, or domains.
 
 Run a scan to check an API for defects.
 
+### Capability 1 — Agentic Onboarding & Tune Loop
+
+The `/onboard-mapi-scan` prompt orchestrates an end-to-end fuzzing onboarding
+workflow: it verifies your environment, runs an initial scan, evaluates endpoint
+coverage, suggests configuration improvements, iterates until coverage meets a
+target threshold or the iteration limit is reached, and emits a final bash script
+you can commit to CI.
+
+**Tools used:**
+
+- `evaluate_scan_quality` — parses the HAR output and spec to compute endpoint
+  coverage (`covered_pct`), surface auth hints, and identify unreachable endpoints
+- `suggest_tune_changes` — applies heuristic rules (auth headers, request count,
+  duration, endpoint exclusions, validation errors) to propose the next tuning step
+- `emit_scan_script` — writes a `set -euo pipefail` bash script with all finalized
+  flags and env-var guards for the leave-behind artifact
+
+**Invoking the prompt:**
+
+In your MCP client, invoke `/onboard-mapi-scan` with the following arguments:
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `api_target` | yes | — | Mayhem project target (e.g. `myorg/api`) |
+| `specification` | yes | — | Path to an OpenAPI/Swagger/Postman spec file |
+| `url` | yes | — | Base URL of the API under test |
+| `duration` | no | `30s` | Initial scan duration |
+| `max_iterations` | no | `3` | Maximum tune-loop iterations |
+| `min_covered_pct` | no | `25` | Coverage threshold that stops the loop early |
+
+The `--har` flag is handled automatically — HAR output is written to `/tmp` and
+threaded through `evaluate_scan_quality` without any manual configuration.
+
+> [!NOTE]
+> Any suggestion to add `--ignore-endpoint` (which narrows the fuzzer's attack
+> surface) will be surfaced with a `[FUZZING NARROWING WARNING]` and requires
+> explicit confirmation before it is applied.
+
 ## Usage
 
 MCP servers are designed to be used with AI applications like Claude, Cursor, or
