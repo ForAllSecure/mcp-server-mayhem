@@ -105,16 +105,12 @@ profile is already configured to use other MCP servers, add the details from the
 `.vscode/mcp.json` file provided in this project to the `mcp.json` file for the
 target profile.
 
-Once the MCP server for `mapi` has been added to a project or profile, open the
-Chat view and use the tool picker to enable the MCP server for `mapi`. These
-steps are outlined in the
-[official documentation](https://code.visualstudio.com/docs/copilot/customization/mcp-servers#_use-mcp-tools-in-chat)
-for using MCP servers with Visual Studio code.
+Once the MCP server for `mapi` has been added to a project or profile, start the server and open your default chat window. Then use the tool picker to enable the MCP server for `mapi`. These steps are outlined in the [official documentation](https://code.visualstudio.com/docs/copilot/customization/mcp-servers#_use-mcp-tools-in-chat) for using MCP servers with Visual Studio code.
 
 ### Use with Cursor
 
 Add the following to `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json`
-for global access), replacing `your-token-here` with your Mayhem API token:
+for global access):
 
 ```json
 {
@@ -123,20 +119,61 @@ for global access), replacing `your-token-here` with your Mayhem API token:
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
+        "--network", "host",
         "-e", "MAYHEM_TOKEN",
         "ghcr.io/forallsecure/mcp-server-mapi:latest",
         "uv", "run", "mcp-server-mapi", "mcp"
-      ],
-      "env": {
-        "MAYHEM_TOKEN": "your-token-here"
-      }
+      ]
     }
   }
 }
 ```
 
+`MAYHEM_TOKEN` is passed through from the host environment — Cursor does not
+support prompted input like VS Code does. Export the token in your shell before
+launching Cursor:
+
+```sh
+export MAYHEM_TOKEN=your-token-here
+```
+
+Add this line to your shell startup file (`~/.zshrc`, `~/.bashrc`, etc.) to
+avoid setting it manually each session.
+
 A reference [`.cursor/mcp.json`](.cursor/mcp.json) file is also included in this
 repository.
+
+### Use with Windsurf
+
+Add the following to `.windsurf/mcp.json` in your project (or
+`~/.codeium/windsurf/mcp_config.json` for global access):
+
+```json
+{
+  "mcpServers": {
+    "mapi": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "--network", "host",
+        "-e", "MAYHEM_TOKEN",
+        "ghcr.io/forallsecure/mcp-server-mapi:latest",
+        "uv", "run", "mcp-server-mapi", "mcp"
+      ]
+    }
+  }
+}
+```
+
+Like Cursor, Windsurf inherits `MAYHEM_TOKEN` from the host environment. Export
+it in your shell before launching Windsurf:
+
+```sh
+export MAYHEM_TOKEN=your-token-here
+```
+
+A reference [`.windsurf/mcp.json`](.windsurf/mcp.json) file is also included in
+this repository.
 
 ### Use with Claude
 

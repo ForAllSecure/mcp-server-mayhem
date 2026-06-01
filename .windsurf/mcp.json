@@ -3,17 +3,17 @@
     "mapi": {
       "command": "docker",
       "args": [
-        "run",
-        "-i",
+        "run", 
+        "-i", 
         "--rm",
-        "--network",
+        "--network", 
         "host",
-        "-e",
+        "-e", 
         "MAYHEM_TOKEN",
         "ghcr.io/forallsecure/mcp-server-mapi:latest",
-        "uv",
-        "run",
-        "mcp-server-mapi",
+        "uv", 
+        "run", 
+        "mcp-server-mapi", 
         "mcp"
       ]
     }

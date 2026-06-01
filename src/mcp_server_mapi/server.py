@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import sys
 import logging
 from typing import Literal, List, Optional
@@ -212,12 +213,13 @@ async def mapi_discover(args: DiscoverArgs, ctx: Context | None = None) -> str:
     _add_opt(cmd, "--oauth2-password-refresh-url", args.oauth2_password_refresh_url)
     _add_repeat(cmd, "--oauth2-password-scopes", args.oauth2_password_scopes)
 
-    # Run it
-    log.info("Running: %s", " ".join(cmd))
+    cmd_str = "$ " + shlex.join(cmd)
+    log.info("Running: %s", cmd_str[2:])
     try:
-        return await run_cli(cmd, timeout_s=600.0, ctx=ctx)
+        out = await run_cli(cmd, timeout_s=600.0, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
     except CLIRuntimeError as e:
-        raise RuntimeError(str(e)) from None
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
 
 
 # -----------------------------
@@ -472,13 +474,15 @@ async def mapi_run(args: RunArgs, ctx: Context | None = None) -> str:
     _add_opt(cmd, "--p12cert", args.p12cert)
     _add_opt(cmd, "--p12password", args.p12password)
 
-    log.info("Running: %s", " ".join(cmd))
+    cmd_str = "$ " + shlex.join(cmd)
+    log.info("Running: %s", cmd_str[2:])
     try:
-        return await run_cli(cmd, timeout_s=args.process_timeout, ctx=ctx)
+        out = await run_cli(cmd, timeout_s=args.process_timeout, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
     except CLIRuntimeError as e:
         if e.exit_code == 1:
-            return e.stdout
-        raise RuntimeError(str(e)) from None
+            return f"{cmd_str}\n\n{e.stdout}"
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
 
 
 # -----------------------------
@@ -503,11 +507,13 @@ async def mapi_target_list(args: TargetListArgs, ctx: Context | None = None) -> 
     cmd: list[str] = [MAPI_BIN, "target", "list"]
     _add_flag(cmd, args.show_dates, "--show-dates")
     _add_opt(cmd, "--max-items", args.max_items)
-    log.info("Running: %s", " ".join(cmd))
+    cmd_str = "$ " + shlex.join(cmd)
+    log.info("Running: %s", cmd_str[2:])
     try:
-        return await run_cli(cmd, ctx=ctx)
+        out = await run_cli(cmd, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
     except CLIRuntimeError as e:
-        raise RuntimeError(str(e)) from None
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
 
 
 # -----------------------------
@@ -532,7 +538,8 @@ def _spec_path_regex(spec_path: str) -> re.Pattern:
 class EvaluateScanQualityArgs(BaseModel):
     scan_output: str = Field(..., description="stdout captured from mapi run")
     har_path: str = Field(..., description="filesystem path to the HAR file produced by the scan (requires --har <path> on the mapi run invocation)")
-    spec_path: str = Field(..., description="filesystem path to the OpenAPI/Swagger/Postman spec used for the scan")
+    spec_path: str = Field(..., description="filesystem path or URL to the OpenAPI/Swagger/Postman spec used for the scan")
+    insecure: bool = Field(False, description="pass -k to mapi describe specification to skip TLS certificate verification — use when spec_path is an https:// URL with a self-signed certificate")
 
 
 # -----------------------------
@@ -549,13 +556,23 @@ class EvaluateScanQualityArgs(BaseModel):
 )
 async def evaluate_scan_quality(args: EvaluateScanQualityArgs, ctx: Context | None = None) -> str:
     # 1. Extract spec endpoints via mapi describe specification
+    spec = args.spec_path
+    if not (spec.startswith("http://") or spec.startswith("https://")):
+        if not Path(spec).exists():
+            raise RuntimeError(
+                f"Spec file not found: {spec!r}. "
+                "Pass the spec as an https:// URL or a valid local file path."
+            )
+    describe_cmd = [MAPI_BIN, "describe", "specification"]
+    if args.insecure:
+        describe_cmd.append("-k")
+    describe_cmd.append(spec)
+    describe_cmd_str = "$ " + shlex.join(describe_cmd)
+    log.info("Running: %s", describe_cmd_str[2:])
     try:
-        spec_output = await run_cli(
-            [MAPI_BIN, "describe", "specification", args.spec_path],
-            timeout_s=30.0,
-        )
+        spec_output = await run_cli(describe_cmd, timeout_s=30.0)
     except CLIRuntimeError as e:
-        raise RuntimeError(str(e)) from None
+        raise RuntimeError(f"{describe_cmd_str}\n\n{e}") from None
 
     seen: set[tuple[str, str]] = set()
     spec_endpoints: list[tuple[str, str]] = []
@@ -648,6 +665,7 @@ async def evaluate_scan_quality(args: EvaluateScanQualityArgs, ctx: Context | No
     ]
 
     return json.dumps({
+        "describe_command": describe_cmd_str,
         "total_endpoints": total,
         "covered_pct": covered_pct,
         "total_requests": total_requests,
@@ -666,8 +684,8 @@ class EmitScanScriptArgs(BaseModel):
     duration: str = Field(..., description="scan duration (e.g., '30s', '2m', '10m')")
     specification: str = Field(..., description="path to the OpenAPI/Swagger/Postman spec file")
     url: str = Field(..., description="base URL for the API (e.g., 'https://localhost:8000')")
-    output_path: str = Field(..., description="filesystem path to write the script; overwrites if already exists")
-    extra_flags: List[str] = Field(default_factory=list, description="additional mapi run flags in argv order (e.g., ['--header-auth', 'Authorization: Bearer ${MAPI_TOKEN}'])")
+    output_path: Optional[str] = Field(None, description="optional filesystem path to write the script; if omitted the script is returned as output only")
+    extra_flags: List[str] = Field(default_factory=list, description="additional mapi run flags in argv order (e.g., ['--header-auth', 'Authorization: Bearer ${TARGET_API_TOKEN}']) — auth tokens here are credentials for the TARGET API, never MAYHEM_TOKEN")
     har_output_path: str = Field("scan.har", description="path for the --har output file embedded in the script (default: scan.har)")
 
 
@@ -676,10 +694,10 @@ class EmitScanScriptArgs(BaseModel):
 # -----------------------------
 @mcp.tool(
     description="""
-    Write a parameterized bash script wrapping the final tuned mapi run invocation.
+    Generate a parameterized bash script wrapping the final tuned mapi run invocation.
     The script uses set -euo pipefail and validates required environment variables at startup.
     Pass auth credentials as ${ENV_VAR} references in extra_flags — never inline secrets.
-    Overwrites output_path if it already exists. Returns the path the script was written to.
+    Always returns the script content. If output_path is provided, also writes it to disk.
     """
 )
 def emit_scan_script(args: EmitScanScriptArgs) -> str:
@@ -704,12 +722,11 @@ def emit_scan_script(args: EmitScanScriptArgs) -> str:
         f"  {args.duration} \\",
         f"  {args.specification} \\",
         f"  --url {args.url} \\",
-        f"  --har {args.har_output_path}",
+        # f"  --har {args.har_output_path}",
     ]
     if all_flags:
-        positional_and_opts[-1] += " \\"
         for i, flag in enumerate(all_flags):
-            suffix = " \\" if i < len(all_flags) - 1 else ""
+            suffix = " \\"
             positional_and_opts.append(f"  {flag}{suffix}")
 
     script = "\n".join([
@@ -720,12 +737,14 @@ def emit_scan_script(args: EmitScanScriptArgs) -> str:
         "",
         "mapi run \\",
         *positional_and_opts,
-        "",
+        "   \"${@}\"", # allow additional flags to be passed when invoking the script
     ])
 
-    Path(args.output_path).write_text(script)
-    os.chmod(args.output_path, 0o755)
-    return f"Script written to {args.output_path}"
+    if args.output_path:
+        Path(args.output_path).write_text(script)
+        os.chmod(args.output_path, 0o755)
+        return f"Script written to {args.output_path}\n\n{script}"
+    return script
 
 
 # -----------------------------
@@ -744,13 +763,17 @@ def _rule_auth(quality: dict, current: dict) -> dict | None:
         return None  # auth flag already set
     hint_text = " ".join(auth_hints).lower()
     if "basic" in hint_text:
-        flag, value = "--basic-auth", "${MAPI_USER}:${MAPI_PASS}"
+        flag, value = "--basic-auth", "${TARGET_API_USER}:${TARGET_API_PASS}"
     else:
-        flag, value = "--header-auth", "Authorization: Bearer ${MAPI_TOKEN}"
+        flag, value = "--header-auth", "Authorization: Bearer ${TARGET_API_TOKEN}"
     return {
         "flag": flag,
         "value": value,
-        "reason": "Auth failure detected — 401/403 responses or auth error in scan output",
+        "reason": (
+            "Auth failure detected — 401/403 responses indicate the API under test "
+            "requires authentication. Replace the placeholder env var with a credential "
+            "for the TARGET API itself (not MAYHEM_TOKEN, which is unrelated)."
+        ),
         "warning": None,
     }
 
@@ -950,7 +973,6 @@ async def onboard_mapi_scan(
     min_covered_pct: int = 25,
 ) -> str:
     har_path = f"/tmp/mapi-onboard-{api_target.replace('/', '-')}.har"
-    script_path = f"./mapi-scan-{api_target.replace('/', '-')}.sh"
     return f"""You are following the mapi onboarding and tune loop for target `{api_target}`.
 Complete each step in order. Surface progress to the user as you go.
 
@@ -973,9 +995,16 @@ If the call fails or MAYHEM_TOKEN appears unset, tell the user and stop.
 
 ## Step 2 — Confirm spec file
 
-Call `read_file("{specification}")` to read the first lines of the spec.
-Confirm the file exists and looks like an OpenAPI/Swagger/Postman spec.
-If the file is missing or unreadable, tell the user and stop.
+If `{specification}` starts with `http://` or `https://`, skip this step (the spec will be
+fetched by mapi directly). Otherwise, call `read_file("{specification}")` to confirm the
+file exists and looks like an OpenAPI/Swagger/Postman spec. If unreadable, tell the user
+and stop.
+
+## Step 2b — TLS state
+
+Track a boolean `insecure = false` for the rest of this session.
+You will set it to `true` only if Step 3 or Step 4 fails with a TLS or certificate error
+(see Step 3 error handling below). Do nothing here — proceed to Step 3.
 
 ## Step 3 — Run initial scan
 
@@ -990,12 +1019,25 @@ Capture the full output as `scan_output`.
 A non-zero mapi exit (exit code 1 = findings present) is normal — the output is still returned.
 Exit codes 2 or 3 indicate real errors — surface them to the user and stop.
 
+**TLS error handling (applies to Step 3 and all evaluate_scan_quality calls):**
+If any tool call fails with an error mentioning TLS, certificate, "insecure", or
+"self-signed":
+- Do NOT attempt to download the spec to a local file as a workaround.
+- Do NOT retry with a different spec path.
+- Ask the user exactly this:
+  "The target uses a self-signed or untrusted certificate. Proceed with TLS
+   verification disabled? (yes/no)"
+- If yes: set `insecure = true`. Pass `insecure = true` to every `evaluate_scan_quality`
+  call for the rest of the session. Then retry the failed step with `insecure = true`.
+- If no: stop and tell the user to configure a trusted certificate.
+
 ## Step 4 — Evaluate quality
 
 Call `evaluate_scan_quality` with:
   scan_output = <full output from Step 3>
   har_path = "{har_path}"
   spec_path = "{specification}"
+  insecure = <value of `insecure` set in Step 2b>
 
 Parse the returned JSON and show the user:
 - covered_pct (% of spec endpoints with at least one 2xx response)
@@ -1037,7 +1079,8 @@ The initial scan (Step 3) is iteration 1. For each subsequent iteration:
      har = "{har_path}". Capture the full output as scan_output.
 
   f. Call `evaluate_scan_quality` again with the new scan_output,
-     har_path = "{har_path}", spec_path = "{specification}".
+     har_path = "{har_path}", spec_path = "{specification}",
+     insecure = <value of `insecure` from Step 2b>.
      Show the updated covered_pct and request count to the user.
      Increment the iteration counter and return to step (a).
 
@@ -1048,19 +1091,19 @@ Call `emit_scan_script` with:
   duration        = <final duration from current_args>
   specification   = "{specification}"
   url             = "{url}"
-  output_path     = "{script_path}"
   har_output_path = "{har_path}"
   extra_flags     = <list of flag-value pairs from current_args that are not positional args,
-                    in argv order — e.g. ["--header-auth", "Authorization: Bearer ${{MAPI_TOKEN}}",
+                    in argv order — e.g. ["--header-auth", "Authorization: Bearer ${{TARGET_API_TOKEN}}",
                     "--min-request-count", "200"]>
 
-Confirm the script was written and show the user the output path.
+Do not pass output_path — the script will be returned as text in the tool output.
+Show the script to the user and tell them to save it to a file of their choosing.
 
 ## Step 7 — Summary
 
 Present a final summary to the user:
 1. Final quality metrics from the last evaluate_scan_quality: covered_pct, total_endpoints, total_requests.
-2. Path to the emitted script: `{script_path}`
+2. Remind the user to save the script shown in Step 6 to a file (e.g. `mapi-scan.sh`).
 3. How many iterations ran and what changed between them.
 4. Any endpoints that remained unreachable (unreachable_endpoints from the last quality JSON).
 5. If covered_pct < {min_covered_pct}% after {max_iterations} iterations:
@@ -1077,6 +1120,10 @@ Present a final summary to the user:
   matching RunArgs fields (e.g., "header_auth", "min_request_count", "duration").
 - emit_scan_script's extra_flags takes argv-order tokens (["--flag", "value", ...]),
   not a dict. Construct this list from current_args before calling emit_scan_script.
+- TLS errors: never work around them by downloading the spec to a local file.
+  Always ask the user, then set `insecure = true` and retry with that flag.
+  Once set, pass `insecure = true` to every evaluate_scan_quality call for the
+  remainder of the session. Do not reset it.
 """
 
 

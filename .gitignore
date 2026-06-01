@@ -9,6 +9,10 @@ wheels/
 # Virtual environments
 .venv
 
+# Claude
 CLAUDE.md
 .claude/
 .apm/
+
+# Demo
+mayhem-demo/

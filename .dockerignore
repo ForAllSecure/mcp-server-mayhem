@@ -3,3 +3,7 @@ claude_desktop_config.json
 .git/
 .gitignore
 .venv
+CLAUDE.md
+.apm/
+.claude/
+__pycache__/
