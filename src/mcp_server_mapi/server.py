@@ -517,6 +517,124 @@ async def mapi_target_list(args: TargetListArgs, ctx: Context | None = None) -> 
 
 
 # -----------------------------
+# Pydantic schema for `mapi describe specification`
+# -----------------------------
+class DescribeSpecificationArgs(BaseModel):
+    spec_path: str = Field(..., description="path or URL to an OpenAPI/Swagger/Postman/HAR spec")
+    insecure: bool = Field(False, description="-k: skip TLS certificate verification when spec_path is an https:// URL with a self-signed certificate")
+
+
+# -----------------------------
+# MCP tool: mapi_describe_specification
+# -----------------------------
+@mcp.tool(
+    description="""
+    Run `mapi describe specification` and return the full resource table for an API spec.
+    Output is one line per parameter: `METHOD /path PARAM_TYPE param_name`.
+    Zero-parameter endpoints appear as `METHOD /path`.
+    Use this to enumerate all endpoints and their parameters before configuring resource hints,
+    endpoint filters, or evaluating scan coverage.
+    Pass insecure=true when the spec URL uses a self-signed TLS certificate.
+    """
+)
+async def mapi_describe_specification(args: DescribeSpecificationArgs, ctx: Context | None = None) -> str:
+    cmd: list[str] = [MAPI_BIN, "describe", "specification"]
+    if args.insecure:
+        cmd.append("-k")
+    cmd.append(args.spec_path)
+    cmd_str = "$ " + shlex.join(cmd)
+    log.info("Running: %s", cmd_str[2:])
+    try:
+        out = await run_cli(cmd, timeout_s=30.0, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
+    except CLIRuntimeError as e:
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
+
+
+# -----------------------------
+# Pydantic schema for `mapi defect list`
+# -----------------------------
+class DefectListArgs(BaseModel):
+    run_id: str = Field(..., description="run ID to fetch defects for, e.g. 'workspace/project/target/12'")
+    max_items: int = Field(100, ge=1, description="--max-items: maximum number of defects to return (default: 100)")
+    include_suppressed: bool = Field(False, description="--include-suppressed: include suppressed defects in output")
+
+
+# -----------------------------
+# MCP tool: mapi_defect_list
+# -----------------------------
+@mcp.tool(
+    description="""
+    List defects discovered during a previous mapi run.
+    Returns a table of defect IDs, rules, and endpoints for the specified run ID.
+    Use this to inspect what vulnerabilities a completed scan found, or to obtain
+    defect IDs for replay with mapi_defect_replay.
+    """
+)
+async def mapi_defect_list(args: DefectListArgs, ctx: Context | None = None) -> str:
+    cmd: list[str] = [MAPI_BIN, "defect", "list"]
+    _add_flag(cmd, args.include_suppressed, "--include-suppressed")
+    _add_opt(cmd, "--max-items", args.max_items)
+    cmd.append(args.run_id)
+    cmd_str = "$ " + shlex.join(cmd)
+    log.info("Running: %s", cmd_str[2:])
+    try:
+        out = await run_cli(cmd, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
+    except CLIRuntimeError as e:
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
+
+
+# -----------------------------
+# Pydantic schema for `mapi defect replay`
+# -----------------------------
+class DefectReplayArgs(BaseModel):
+    run_id: str = Field(..., description="run ID to replay defects from, e.g. 'workspace/project/target/12'")
+    defect_ids: List[str] = Field(default_factory=list, description="-d/--defect: specific defect IDs to replay (repeatable); if empty, all defects from the run are replayed")
+    specification: Optional[str] = Field(None, description="optional path or URL to a spec to replay against — useful for verifying a fix in an updated spec")
+    url: Optional[str] = Field(None, description="--url: override the server URL for the API under test")
+    include_suppressed: bool = Field(False, description="--include-suppressed: include suppressed defects in replay")
+    verify_tls: bool = Field(False, description="--verify-tls: validate TLS certificates when communicating with the target API")
+    header_auth: List[str] = Field(default_factory=list, description='--header-auth "Authorization:Bearer token" — auth header for the TARGET API (repeatable)')
+    cookie_auth: List[str] = Field(default_factory=list, description='--cookie-auth "sessionId=xyz" (repeatable)')
+    basic_auth: Optional[str] = Field(None, description='--basic-auth "username:password"')
+
+
+# -----------------------------
+# MCP tool: mapi_defect_replay
+# -----------------------------
+@mcp.tool(
+    description="""
+    Replay defects from a previous mapi run to check whether they still reproduce.
+    Exit code 1 (defects still reproduce) is treated as a normal result and returned as output.
+    Optionally replay against an updated spec or URL to verify that a fix is effective.
+    Use defect_ids to replay specific defects; omit to replay all defects from the run.
+    """
+)
+async def mapi_defect_replay(args: DefectReplayArgs, ctx: Context | None = None) -> str:
+    cmd: list[str] = [MAPI_BIN, "defect", "replay"]
+    _add_flag(cmd, args.verify_tls, "--verify-tls")
+    _add_flag(cmd, args.include_suppressed, "--include-suppressed")
+    _add_opt(cmd, "--url", args.url)
+    _add_opt(cmd, "--basic-auth", args.basic_auth)
+    _add_repeat(cmd, "--cookie-auth", args.cookie_auth)
+    _add_repeat(cmd, "--header-auth", args.header_auth)
+    _add_repeat(cmd, "--defect", args.defect_ids)
+    cmd.append(args.run_id)
+    if args.specification:
+        cmd.append(args.specification)
+    cmd_str = "$ " + shlex.join(cmd)
+    log.info("Running: %s", cmd_str[2:])
+    try:
+        out = await run_cli(cmd, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
+    except CLIRuntimeError as e:
+        if e.exit_code == 1:
+            return f"{cmd_str}\n\n{e.stdout}"
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
+
+
+# -----------------------------
 # Helpers for evaluate_scan_quality
 # -----------------------------
 def _spec_path_regex(spec_path: str) -> re.Pattern:
