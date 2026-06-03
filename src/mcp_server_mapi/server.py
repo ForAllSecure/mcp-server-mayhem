@@ -1076,6 +1076,302 @@ def suggest_tune_changes(args: SuggestTuneChangesArgs) -> str:
 
 
 # -----------------------------
+# Helpers for suggest_source_aware_changes
+# -----------------------------
+_ID_PARAM_RE = re.compile(r'(_id|Id|_ID|ID|_uuid|uuid|Uuid|username|slug|handle)$')
+_ENUM_PARAM_RE = re.compile(r'(_type|_status|_state|_kind)$')
+_CRED_PARAM_RE = re.compile(r'(token|_key|_secret|api_key|password)$')
+
+_PATTERN_RULE_MAP: dict[str, tuple[str, str, str]] = {
+    "sql": (
+        "--include-rule", "sql-injection",
+        "Source contains SQL query patterns — sql-injection rule is highly relevant",
+    ),
+    "subprocess": (
+        "--include-rule", "command-injection",
+        "Source contains subprocess/os.system patterns — command-injection rule is highly relevant",
+    ),
+    "file_ops": (
+        "--include-rule", "path-traversal",
+        "Source contains file path operations — path-traversal rule is highly relevant",
+    ),
+}
+_EXPERIMENTAL_PATTERNS = {"pii", "nosql"}
+
+
+def _parse_spec_params(spec_output: str) -> list[tuple[str, str, str, str]]:
+    """Return (method, path, param_type, resource_path) for every parameter line."""
+    params = []
+    for line in spec_output.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            params.append((parts[0].upper(), parts[1], parts[2].upper(), parts[3]))
+    return params
+
+
+def _rule_path_id_params(
+    params: list[tuple[str, str, str, str]],
+    source_context: dict,
+    current_hints: list[str],
+) -> list[dict]:
+    suggestions = []
+    seen: set[str] = set()
+    for _, path, param_type, resource_path in params:
+        if param_type != "PATH":
+            continue
+        param_name = resource_path.split("/")[-1]
+        if param_name in seen or not _ID_PARAM_RE.search(param_name):
+            continue
+        if any(param_name in h for h in current_hints):
+            continue
+        values = source_context.get(param_name, [])
+        if not values:
+            continue
+        seen.add(param_name)
+        suggestions.append({
+            "flag": "--resource-hint",
+            "value": f"{param_name}$:{values[0]}",
+            "reason": (
+                f"PATH parameter '{param_name}' on {path} requires a real entity value — "
+                "mapi cannot random-walk into valid IDs; seeded from source context"
+            ),
+            "warning": None,
+        })
+    return suggestions
+
+
+def _rule_enum_params(
+    params: list[tuple[str, str, str, str]],
+    source_context: dict,
+    current_hints: list[str],
+) -> list[dict]:
+    suggestions = []
+    seen: set[str] = set()
+    for _, path, param_type, resource_path in params:
+        if param_type not in ("BODY", "QUERY"):
+            continue
+        param_name = resource_path.split("/")[-1]
+        if param_name in seen or not _ENUM_PARAM_RE.search(param_name):
+            continue
+        if any(param_name in h for h in current_hints):
+            continue
+        values = source_context.get(param_name, [])
+        if not values:
+            continue
+        seen.add(param_name)
+        suggestions.append({
+            "flag": "--resource-hint",
+            "value": f"{param_name}$:{values[0]}",
+            "reason": (
+                f"BODY/QUERY parameter '{param_name}' on {path} looks like an enum — "
+                "seeded with known value from source context"
+            ),
+            "warning": None,
+        })
+    return suggestions
+
+
+def _rule_skip_credentials(params: list[tuple[str, str, str, str]]) -> list[dict]:
+    suggestions = []
+    seen: set[str] = set()
+    for _, _, _, resource_path in params:
+        param_name = resource_path.split("/")[-1]
+        if param_name in seen or not _CRED_PARAM_RE.search(param_name):
+            continue
+        seen.add(param_name)
+        suggestions.append({
+            "flag": None,
+            "value": None,
+            "reason": (
+                f"Parameter '{param_name}' looks like a credential — "
+                "resource hints for credentials are not suggested automatically. "
+                "Use --header-auth or --basic-auth instead."
+            ),
+            "warning": None,
+        })
+    return suggestions
+
+
+def _rule_source_patterns(source_context: dict, current: dict) -> list[dict]:
+    patterns = source_context.get("__source_patterns__", [])
+    if not patterns:
+        return []
+    suggestions = []
+    experimental_needed = False
+    for pattern in patterns:
+        if pattern in _PATTERN_RULE_MAP:
+            flag, value, reason = _PATTERN_RULE_MAP[pattern]
+            if value not in current.get("include_rule", []):
+                suggestions.append({"flag": flag, "value": value, "reason": reason, "warning": None})
+        elif pattern in _EXPERIMENTAL_PATTERNS and not current.get("experimental_rules"):
+            experimental_needed = True
+    if experimental_needed:
+        found = [p for p in patterns if p in _EXPERIMENTAL_PATTERNS]
+        suggestions.append({
+            "flag": "--experimental-rules",
+            "value": None,
+            "reason": f"Source patterns {found} suggest enabling experimental rules (pii-disclosure, nosql-injection)",
+            "warning": None,
+        })
+    return suggestions
+
+
+def _rule_ignore_rule_requests(source_context: dict, current: dict) -> list[dict]:
+    ignore_rules = source_context.get("__ignore_rules__", [])
+    if not ignore_rules:
+        return []
+    suggestions = []
+    existing = current.get("ignore_rule", [])
+    for rule_name in ignore_rules:
+        if rule_name in existing:
+            continue
+        suggestions.append({
+            "flag": "--ignore-rule",
+            "value": rule_name,
+            "reason": f"Requested suppression of rule '{rule_name}'",
+            "warning": (
+                f"[FUZZING NARROWING WARNING] Ignoring rule '{rule_name}' suppresses all detections "
+                "of that defect class. Confirm this is intentional before applying."
+            ),
+        })
+    return suggestions
+
+
+# -----------------------------
+# Pydantic schema for suggest_source_aware_changes
+# -----------------------------
+class SuggestSourceAwareChangesArgs(BaseModel):
+    spec_output: str = Field(..., description="raw text output from mapi_describe_specification")
+    source_context_json: str = Field(
+        default="{}",
+        description=(
+            'JSON object mapping parameter names to known valid values, '
+            'e.g. {"username": ["alice"], "status": ["available", "pending"]}. '
+            'May also include special keys: '
+            '"__source_patterns__": ["sql","subprocess","file_ops","pii","nosql"] for rule prioritization, '
+            'and "__ignore_rules__": ["rule-name"] for user-requested suppressions (carries [FUZZING NARROWING WARNING]).'
+        ),
+    )
+    current_args_json: str = Field(
+        default="{}",
+        description="JSON of current mapi run arguments (to skip already-set hints and rules)",
+    )
+
+
+# -----------------------------
+# MCP tool: suggest_source_aware_changes
+# -----------------------------
+@mcp.tool(
+    description="""
+    Suggest source-aware mapi run changes based on spec parameter analysis and source code context.
+    Generates --resource-hint suggestions for PATH parameters that need real entity values,
+    --include-rule suggestions based on source code patterns (sql, subprocess, file ops, pii, nosql),
+    and --ignore-rule suggestions (with [FUZZING NARROWING WARNING]) when explicitly requested.
+    Credential-named parameters are flagged as informational — never auto-suggested as hints.
+    Limits resource hint suggestions to a small set (3-5) to preserve fuzzer input entropy.
+    Call mapi_describe_specification first to get spec_output.
+    """
+)
+def suggest_source_aware_changes(args: SuggestSourceAwareChangesArgs) -> str:
+    try:
+        source_context = json.loads(args.source_context_json)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid source_context_json: {e}") from None
+    try:
+        current = json.loads(args.current_args_json)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid current_args_json: {e}") from None
+
+    params = _parse_spec_params(args.spec_output)
+    current_hints = current.get("resource_hint", [])
+
+    hint_suggestions: list[dict] = []
+    hint_suggestions.extend(_rule_path_id_params(params, source_context, current_hints))
+    hint_suggestions.extend(_rule_enum_params(params, source_context, current_hints))
+    # Cap resource hints at 5 to preserve fuzzer entropy
+    hint_suggestions = hint_suggestions[:5]
+
+    other_suggestions: list[dict] = []
+    other_suggestions.extend(_rule_skip_credentials(params))
+    other_suggestions.extend(_rule_source_patterns(source_context, current))
+    other_suggestions.extend(_rule_ignore_rule_requests(source_context, current))
+
+    suggestions = hint_suggestions + other_suggestions
+    actionable = sum(1 for s in suggestions if s["flag"] is not None)
+    rationale = (
+        f"{actionable} actionable suggestion(s) from {len(params)} spec parameters."
+        if actionable
+        else f"No source-aware suggestions: provide values in source_context_json for PATH/enum parameters, or add __source_patterns__ for rule prioritization."
+    )
+    return json.dumps({"suggestions": suggestions, "exhausted": False, "rationale": rationale}, indent=2)
+
+
+# -----------------------------
+# Pydantic schema for emit_mapi_config
+# -----------------------------
+class EmitMapiConfigArgs(BaseModel):
+    resource_hint_groups: List[List[str]] = Field(
+        default_factory=list,
+        description=(
+            "list of hint groups for correlated parameter seeding; "
+            "each group is a list of 'resource_path_regex:value' strings selected together. "
+            "Use multiple groups when parameters must be consistent (e.g. username and userStatus). "
+            "Single-item groups are equivalent to CLI --resource-hint flags."
+        ),
+    )
+    suppressed_rules: List[str] = Field(
+        default_factory=list,
+        description=(
+            "list of mapi rule names to suppress in the config "
+            "(e.g. 'internal-server-error'). Each requires prior [FUZZING NARROWING WARNING] acknowledgment."
+        ),
+    )
+    output_path: Optional[str] = Field(
+        None,
+        description="optional filesystem path to write the .mapi YAML config; if omitted the config is returned as output only",
+    )
+
+
+# -----------------------------
+# MCP tool: emit_mapi_config
+# -----------------------------
+@mcp.tool(
+    description="""
+    Generate a .mapi YAML configuration file with resource hint groups and issue suppressions.
+    Use this when correlated parameter grouping is needed (multiple parameters must be seeded
+    together) or when the config should be committed to source control for team sharing.
+    For a one-off scan, the bash script from emit_scan_script is sufficient.
+    Always returns the YAML content; also writes to output_path if provided.
+    """
+)
+def emit_mapi_config(args: EmitMapiConfigArgs) -> str:
+    lines = ['version: "1.0"', ""]
+
+    if args.resource_hint_groups:
+        lines.append("resource_hints:")
+        for i, group in enumerate(args.resource_hint_groups):
+            lines.append(f'- name: "group-{i + 1}"')
+            lines.append("  hints:")
+            for hint in group:
+                lines.append(f'  - "{hint}"')
+        lines.append("")
+
+    if args.suppressed_rules:
+        lines.append("suppressed:")
+        for rule in args.suppressed_rules:
+            lines.append(f'- reason: "Suppressed by mapi onboarding — review before committing"')
+            lines.append(f'  rule_id: "{rule}"')
+        lines.append("")
+
+    config = "\n".join(lines)
+
+    if args.output_path:
+        Path(args.output_path).write_text(config)
+        return f"Config written to {args.output_path}\n\n{config}"
+    return config
+
+
+# -----------------------------
 # MCP prompt: onboard-mapi-scan
 # -----------------------------
 @mcp.prompt(
@@ -1157,13 +1453,63 @@ Call `evaluate_scan_quality` with:
   spec_path = "{specification}"
   insecure = <value of `insecure` set in Step 2b>
 
-Parse the returned JSON and show the user:
+Also call `mapi_describe_specification` with:
+  spec_path = "{specification}"
+  insecure = <value of `insecure` set in Step 2b>
+Store the raw text output as `spec_param_table` for use in Step 4.5.
+
+Parse the evaluate_scan_quality JSON and show the user:
 - covered_pct (% of spec endpoints with at least one 2xx response)
 - total_endpoints and total_requests
 - auth_hints (if non-empty — these indicate auth is blocking the fuzzer)
 - unreachable_endpoints (if non-empty)
 
-Store this quality JSON for Step 5.
+Store this quality JSON for Step 4.5 and Step 5.
+
+## Step 4.5 — Source-aware seeding (optional)
+
+After showing quality metrics, ask the user:
+"Is source code for this API available locally? If so, I can look for fixture
+data, enum definitions, or seed values to help mapi cover low-coverage endpoints."
+
+If the user says yes or provides a path:
+
+  a. Look at endpoint_stats from the quality JSON. Identify endpoints where
+     ok_count == 0 and param_type includes PATH — these most need real entity values.
+     Show the user the specific PATH parameters you found.
+
+  b. Ask: "I found these PATH parameters that likely need real entity values:
+     [list them]. Can you point me to files with valid values — fixture files,
+     enum definitions, test seeds, or database seeders?"
+
+  c. For each file path the user provides, call read_file(<path>) and extract values
+     for the identified parameters. Also note any of these source patterns:
+     - SQL query strings → add "sql" to source_patterns
+     - subprocess/exec/system calls → add "subprocess" to source_patterns
+     - File path operations (open, fs.read, os.path) → add "file_ops" to source_patterns
+     - PII field names (ssn, email, dob, phone, nhs_number) → add "pii" to source_patterns
+     - MongoDB/Redis/DynamoDB usage → add "nosql" to source_patterns
+
+  d. Build source_context_json:
+     {{"param_name": ["value1", "value2"], ..., "__source_patterns__": [...]}}
+
+  e. Call `suggest_source_aware_changes` with:
+       spec_output         = `spec_param_table` (from Step 4)
+       source_context_json = <built above>
+       current_args_json   = <JSON string of current_args>
+
+  f. Present suggestions to the user:
+     - For each `--resource-hint` suggestion: explain it seeds a specific parameter
+       with a known-good value. Apply approved hints to current_args.
+       **Do NOT apply more than 3-5 resource hints total** — too many compress
+       the fuzzer's input entropy and reduce coverage diversity.
+     - For each `--include-rule` or `--experimental-rules` suggestion: apply directly
+       to current_args (these expand detection, no confirmation needed).
+     - For any `--ignore-rule` suggestion: show the [FUZZING NARROWING WARNING] and
+       ask explicit yes/no before applying.
+     - For informational suggestions (flag=null): note them to the user, no change.
+
+If the user skips: proceed directly to Step 5.
 
 ## Step 5 — Tune loop (up to {max_iterations} total scan iterations)
 
@@ -1217,6 +1563,22 @@ Call `emit_scan_script` with:
 Do not pass output_path — the script will be returned as text in the tool output.
 Show the script to the user and tell them to save it to a file of their choosing.
 
+After showing the script, ask:
+"Would you like a .mapi config file for reuse or to commit to source control?
+This is most useful if (a) you want correlated parameter groups — e.g., username
+and userStatus always seeded together, or (b) you want to store suppressions in SCM
+so the team shares the same ignore rules. If you just need to run the scan once,
+the bash script is sufficient."
+
+If yes: call `emit_mapi_config` with:
+  resource_hint_groups = <list of hint groups — put correlated hints in the same group,
+                          unrelated hints each in their own single-item group>
+  suppressed_rules     = <list of any --ignore-rule values the user confirmed>
+  (omit output_path — return as text so the user can save it)
+Show the YAML and tell the user to save it as `.mapi` in their project root.
+
+If no or skipping: proceed to Step 7.
+
 ## Step 7 — Summary
 
 Present a final summary to the user:
@@ -1240,8 +1602,15 @@ Present a final summary to the user:
   not a dict. Construct this list from current_args before calling emit_scan_script.
 - TLS errors: never work around them by downloading the spec to a local file.
   Always ask the user, then set `insecure = true` and retry with that flag.
-  Once set, pass `insecure = true` to every evaluate_scan_quality call for the
-  remainder of the session. Do not reset it.
+  Once set, pass `insecure = true` to every evaluate_scan_quality and
+  mapi_describe_specification call for the remainder of the session. Do not reset it.
+- Step 4.5 resource hints: keep the total count at 3-5 maximum. More hints compress
+  fuzzer entropy — mapi applies them on >90% of requests.
+- suggest_source_aware_changes returns rule suggestions in the same schema as
+  suggest_tune_changes. --include-rule and --experimental-rules need no confirmation;
+  --ignore-rule always requires explicit yes/no (carries [FUZZING NARROWING WARNING]).
+- emit_mapi_config is optional and conditional — only offer it when correlated groups
+  or SCM-stored suppressions genuinely add value over the bash script alone.
 """
 
 
