@@ -21,7 +21,7 @@ Discover APIs running on a single host, multiple hosts, CIDR blocks, or domains.
 
 Run a scan to check an API for defects.
 
-### Capability 1 — Agentic Onboarding & Tune Loop
+### Capability 1 - Agentic Onboarding & Tune Loop
 
 The `/onboard-mapi-scan` prompt orchestrates an end-to-end fuzzing onboarding
 workflow: it verifies your environment, runs an initial scan, evaluates endpoint
@@ -31,11 +31,11 @@ you can commit to CI.
 
 **Tools used:**
 
-- `evaluate_scan_quality` — parses the HAR output and spec to compute endpoint
+- `evaluate_scan_quality` - parses the HAR output and spec to compute endpoint
   coverage (`covered_pct`), surface auth hints, and identify unreachable endpoints
-- `suggest_tune_changes` — applies heuristic rules (auth headers, request count,
+- `suggest_tune_changes` - applies heuristic rules (auth headers, request count,
   duration, endpoint exclusions, validation errors) to propose the next tuning step
-- `emit_scan_script` — writes a `set -euo pipefail` bash script with all finalized
+- `emit_scan_script` - writes a `set -euo pipefail` bash script with all finalized
   flags and env-var guards for the leave-behind artifact
 
 **Invoking the prompt:**
@@ -44,20 +44,67 @@ In your MCP client, invoke `/onboard-mapi-scan` with the following arguments:
 
 | Argument | Required | Default | Description |
 |---|---|---|---|
-| `api_target` | yes | — | Mayhem project target (e.g. `myorg/api`) |
-| `specification` | yes | — | Path to an OpenAPI/Swagger/Postman spec file |
-| `url` | yes | — | Base URL of the API under test |
+| `api_target` | yes | - | Mayhem project target (e.g. `myorg/api`) |
+| `specification` | yes | - | Path to an OpenAPI/Swagger/Postman spec file |
+| `url` | yes | - | Base URL of the API under test |
 | `duration` | no | `30s` | Initial scan duration |
 | `max_iterations` | no | `3` | Maximum tune-loop iterations |
 | `min_covered_pct` | no | `25` | Coverage threshold that stops the loop early |
 
-The `--har` flag is handled automatically — HAR output is written to `/tmp` and
+The `--har` flag is handled automatically - HAR output is written to `/tmp` and
 threaded through `evaluate_scan_quality` without any manual configuration.
 
 > [!NOTE]
 > Any suggestion to add `--ignore-endpoint` (which narrows the fuzzer's attack
 > surface) will be surfaced with a `[FUZZING NARROWING WARNING]` and requires
 > explicit confirmation before it is applied.
+
+### Capability 2 - Source-Aware Fuzzing
+
+After the first quality evaluation, the `/onboard-mapi-scan` prompt optionally
+analyzes the API spec and source code to propose targeted configuration improvements:
+resource hints for low-coverage PATH parameters, rule prioritization based on
+observed code patterns, and endpoint or tag filters where appropriate.
+
+**Tools used:**
+
+- `mapi_describe_specification` - fetches the full parameter table from a spec
+  (used internally by the prompt to identify which parameters need seeding)
+- `suggest_source_aware_changes` - applies heuristic rules to spec parameters and
+  source-extracted values to propose `--resource-hint`, `--include-rule`, and
+  `--experimental-rules` changes
+- `emit_mapi_config` - generates a `.mapi` YAML configuration file with correlated
+  resource hint groups and issue suppressions for team sharing or SCM storage
+
+**How it works:**
+
+Capability 2 runs as an optional **Step 4.5** inside the `/onboard-mapi-scan`
+flow, after the first scan quality evaluation. The prompt identifies PATH parameters
+with zero coverage, asks you to point to relevant source files (fixture data, enum
+definitions, seed files), reads them, and generates a small number
+of targeted hints. It also detects code patterns (SQL queries, subprocess calls,
+file operations, PII fields) and suggests enabling the corresponding mapi rules.
+
+No additional prompt invocation is needed - it is part of the standard
+`/onboard-mapi-scan` flow.
+
+**Fuzziness guardrail:**
+
+- `--resource-hint` and `--include-rule` suggestions are applied without extra
+  confirmation - they expand mapi's reach, not narrow it
+- Any suggestion involving `--ignore-endpoint`, `--ignore-endpoints-by-tag`, or
+  `--ignore-rule` carries a `[FUZZING NARROWING WARNING]` and requires explicit
+  confirmation before it is applied
+- Resource hints are capped at 3–5 per session to preserve fuzzer input entropy
+  (mapi applies hints on the majority of generated requests)
+
+**`.mapi` config file:**
+
+At the end of the flow, the prompt optionally offers to generate a `.mapi` YAML
+config file via `emit_mapi_config`. This is most useful when you need correlated
+parameter groups (multiple parameters seeded together consistently) or want to
+commit suppressions to source control for team sharing. For one-off scans, the
+emitted bash script is sufficient.
 
 ## Usage
 
@@ -129,7 +176,7 @@ for global access):
 }
 ```
 
-`MAYHEM_TOKEN` is passed through from the host environment — Cursor does not
+`MAYHEM_TOKEN` is passed through from the host environment - Cursor does not
 support prompted input like VS Code does. Export the token in your shell before
 launching Cursor:
 

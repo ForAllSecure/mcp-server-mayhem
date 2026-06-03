@@ -591,11 +591,11 @@ async def mapi_defect_list(args: DefectListArgs, ctx: Context | None = None) -> 
 class DefectReplayArgs(BaseModel):
     run_id: str = Field(..., description="run ID to replay defects from, e.g. 'workspace/project/target/12'")
     defect_ids: List[str] = Field(default_factory=list, description="-d/--defect: specific defect IDs to replay (repeatable); if empty, all defects from the run are replayed")
-    specification: Optional[str] = Field(None, description="optional path or URL to a spec to replay against — useful for verifying a fix in an updated spec")
+    specification: Optional[str] = Field(None, description="optional path or URL to a spec to replay against - useful for verifying a fix in an updated spec")
     url: Optional[str] = Field(None, description="--url: override the server URL for the API under test")
     include_suppressed: bool = Field(False, description="--include-suppressed: include suppressed defects in replay")
     verify_tls: bool = Field(False, description="--verify-tls: validate TLS certificates when communicating with the target API")
-    header_auth: List[str] = Field(default_factory=list, description='--header-auth "Authorization:Bearer token" — auth header for the TARGET API (repeatable)')
+    header_auth: List[str] = Field(default_factory=list, description='--header-auth "Authorization:Bearer token" - auth header for the TARGET API (repeatable)')
     cookie_auth: List[str] = Field(default_factory=list, description='--cookie-auth "sessionId=xyz" (repeatable)')
     basic_auth: Optional[str] = Field(None, description='--basic-auth "username:password"')
 
@@ -657,7 +657,7 @@ class EvaluateScanQualityArgs(BaseModel):
     scan_output: str = Field(..., description="stdout captured from mapi run")
     har_path: str = Field(..., description="filesystem path to the HAR file produced by the scan (requires --har <path> on the mapi run invocation)")
     spec_path: str = Field(..., description="filesystem path or URL to the OpenAPI/Swagger/Postman spec used for the scan")
-    insecure: bool = Field(False, description="pass -k to mapi describe specification to skip TLS certificate verification — use when spec_path is an https:// URL with a self-signed certificate")
+    insecure: bool = Field(False, description="pass -k to mapi describe specification to skip TLS certificate verification - use when spec_path is an https:// URL with a self-signed certificate")
 
 
 # -----------------------------
@@ -803,7 +803,7 @@ class EmitScanScriptArgs(BaseModel):
     specification: str = Field(..., description="path to the OpenAPI/Swagger/Postman spec file")
     url: str = Field(..., description="base URL for the API (e.g., 'https://localhost:8000')")
     output_path: Optional[str] = Field(None, description="optional filesystem path to write the script; if omitted the script is returned as output only")
-    extra_flags: List[str] = Field(default_factory=list, description="additional mapi run flags in argv order (e.g., ['--header-auth', 'Authorization: Bearer ${TARGET_API_TOKEN}']) — auth tokens here are credentials for the TARGET API, never MAYHEM_TOKEN")
+    extra_flags: List[str] = Field(default_factory=list, description="additional mapi run flags in argv order (e.g., ['--header-auth', 'Authorization: Bearer ${TARGET_API_TOKEN}']) - auth tokens here are credentials for the TARGET API, never MAYHEM_TOKEN")
     har_output_path: str = Field("scan.har", description="path for the --har output file embedded in the script (default: scan.har)")
 
 
@@ -814,7 +814,7 @@ class EmitScanScriptArgs(BaseModel):
     description="""
     Generate a parameterized bash script wrapping the final tuned mapi run invocation.
     The script uses set -euo pipefail and validates required environment variables at startup.
-    Pass auth credentials as ${ENV_VAR} references in extra_flags — never inline secrets.
+    Pass auth credentials as ${ENV_VAR} references in extra_flags - never inline secrets.
     Always returns the script content. If output_path is provided, also writes it to disk.
     """
 )
@@ -888,7 +888,7 @@ def _rule_auth(quality: dict, current: dict) -> dict | None:
         "flag": flag,
         "value": value,
         "reason": (
-            "Auth failure detected — 401/403 responses indicate the API under test "
+            "Auth failure detected - 401/403 responses indicate the API under test "
             "requires authentication. Replace the placeholder env var with a credential "
             "for the TARGET API itself (not MAYHEM_TOKEN, which is unrelated)."
         ),
@@ -912,7 +912,7 @@ def _rule_min_requests(quality: dict, current: dict, min_covered_pct: int) -> di
     return {
         "flag": "--min-request-count",
         "value": str(suggested),
-        "reason": f"Low endpoint coverage ({covered_pct}%) with time remaining — increase per-endpoint request budget",
+        "reason": f"Low endpoint coverage ({covered_pct}%) with time remaining - increase per-endpoint request budget",
         "warning": None,
     }
 
@@ -944,7 +944,7 @@ def _rule_duration(quality: dict, current: dict, min_covered_pct: int) -> dict |
     return {
         "flag": "duration",
         "value": next_dur,
-        "reason": f"Low endpoint coverage ({covered_pct}%) and scan hit time limit — increase duration from {current_duration} to {next_dur}",
+        "reason": f"Low endpoint coverage ({covered_pct}%) and scan hit time limit - increase duration from {current_duration} to {next_dur}",
         "warning": None,
     }
 
@@ -991,7 +991,7 @@ def _rule_validation_errors(quality: dict, min_covered_pct: int) -> dict | None:
         "value": None,
         "reason": (
             f"High validation-error rate ({val_errors}/{total} requests returned 400/422). "
-            "Resource hints can seed valid parameter values — support coming in Capability 2."
+            "Resource hints can seed valid parameter values - support coming in Capability 2."
         ),
         "warning": None,
     }
@@ -1015,7 +1015,7 @@ class SuggestTuneChangesArgs(BaseModel):
     Analyze mapi scan quality metrics and suggest flag changes to improve coverage.
     Applies 6 deterministic heuristic rules in priority order.
     Returns a JSON object with a suggestions list, exhausted flag, and rationale.
-    Rule 4 (--ignore-endpoint suggestions) always carries a [FUZZING NARROWING WARNING] —
+    Rule 4 (--ignore-endpoint suggestions) always carries a [FUZZING NARROWING WARNING] -
     present this warning to the user and require explicit approval before applying.
     When exhausted=true, quality thresholds are met or heuristics are exhausted.
     """
@@ -1029,12 +1029,12 @@ def suggest_tune_changes(args: SuggestTuneChangesArgs) -> str:
 
     covered_pct = quality.get("covered_pct", 0)
 
-    # Rule 6: convergence check — fast exit if threshold met
+    # Rule 6: convergence check - fast exit if threshold met
     if covered_pct >= args.min_covered_pct:
         return json.dumps({
             "suggestions": [],
             "exhausted": True,
-            "rationale": f"Quality threshold met — coverage {covered_pct}% ≥ {args.min_covered_pct}%. Ready to emit scan script.",
+            "rationale": f"Quality threshold met - coverage {covered_pct}% ≥ {args.min_covered_pct}%. Ready to emit scan script.",
         }, indent=2)
 
     # Rules 1–5
@@ -1085,15 +1085,15 @@ _CRED_PARAM_RE = re.compile(r'(token|_key|_secret|api_key|password)$')
 _PATTERN_RULE_MAP: dict[str, tuple[str, str, str]] = {
     "sql": (
         "--include-rule", "sql-injection",
-        "Source contains SQL query patterns — sql-injection rule is highly relevant",
+        "Source contains SQL query patterns - sql-injection rule is highly relevant",
     ),
     "subprocess": (
         "--include-rule", "command-injection",
-        "Source contains subprocess/os.system patterns — command-injection rule is highly relevant",
+        "Source contains subprocess/os.system patterns - command-injection rule is highly relevant",
     ),
     "file_ops": (
         "--include-rule", "path-traversal",
-        "Source contains file path operations — path-traversal rule is highly relevant",
+        "Source contains file path operations - path-traversal rule is highly relevant",
     ),
 }
 _EXPERIMENTAL_PATTERNS = {"pii", "nosql"}
@@ -1132,7 +1132,7 @@ def _rule_path_id_params(
             "flag": "--resource-hint",
             "value": f"{param_name}$:{values[0]}",
             "reason": (
-                f"PATH parameter '{param_name}' on {path} requires a real entity value — "
+                f"PATH parameter '{param_name}' on {path} requires a real entity value - "
                 "mapi cannot random-walk into valid IDs; seeded from source context"
             ),
             "warning": None,
@@ -1163,7 +1163,7 @@ def _rule_enum_params(
             "flag": "--resource-hint",
             "value": f"{param_name}$:{values[0]}",
             "reason": (
-                f"BODY/QUERY parameter '{param_name}' on {path} looks like an enum — "
+                f"BODY/QUERY parameter '{param_name}' on {path} looks like an enum - "
                 "seeded with known value from source context"
             ),
             "warning": None,
@@ -1183,7 +1183,7 @@ def _rule_skip_credentials(params: list[tuple[str, str, str, str]]) -> list[dict
             "flag": None,
             "value": None,
             "reason": (
-                f"Parameter '{param_name}' looks like a credential — "
+                f"Parameter '{param_name}' looks like a credential - "
                 "resource hints for credentials are not suggested automatically. "
                 "Use --header-auth or --basic-auth instead."
             ),
@@ -1267,7 +1267,7 @@ class SuggestSourceAwareChangesArgs(BaseModel):
     Generates --resource-hint suggestions for PATH parameters that need real entity values,
     --include-rule suggestions based on source code patterns (sql, subprocess, file ops, pii, nosql),
     and --ignore-rule suggestions (with [FUZZING NARROWING WARNING]) when explicitly requested.
-    Credential-named parameters are flagged as informational — never auto-suggested as hints.
+    Credential-named parameters are flagged as informational - never auto-suggested as hints.
     Limits resource hint suggestions to a small set (3-5) to preserve fuzzer input entropy.
     Call mapi_describe_specification first to get spec_output.
     """
@@ -1359,7 +1359,7 @@ def emit_mapi_config(args: EmitMapiConfigArgs) -> str:
     if args.suppressed_rules:
         lines.append("suppressed:")
         for rule in args.suppressed_rules:
-            lines.append(f'- reason: "Suppressed by mapi onboarding — review before committing"')
+            lines.append(f'- reason: "Suppressed by mapi onboarding - review before committing"')
             lines.append(f'  rule_id: "{rule}"')
         lines.append("")
 
@@ -1394,33 +1394,33 @@ Complete each step in order. Surface progress to the user as you go.
 - api_target: {api_target}
 - specification: {specification}
 - url: {url}
-- duration: {duration} (initial — may change after tuning)
+- duration: {duration} (initial - may change after tuning)
 - max_iterations: {max_iterations}
 - min_covered_pct: {min_covered_pct}%
 - HAR output path: {har_path}
 
 ---
 
-## Step 1 — Verify environment
+## Step 1 - Verify environment
 
 Call `mapi_target_list` with default arguments (empty TargetListArgs).
 Confirm the response lists at least one target and contains no authentication error.
 If the call fails or MAYHEM_TOKEN appears unset, tell the user and stop.
 
-## Step 2 — Confirm spec file
+## Step 2 - Confirm spec file
 
 If `{specification}` starts with `http://` or `https://`, skip this step (the spec will be
 fetched by mapi directly). Otherwise, call `read_file("{specification}")` to confirm the
 file exists and looks like an OpenAPI/Swagger/Postman spec. If unreadable, tell the user
 and stop.
 
-## Step 2b — TLS state
+## Step 2b - TLS state
 
 Track a boolean `insecure = false` for the rest of this session.
 You will set it to `true` only if Step 3 or Step 4 fails with a TLS or certificate error
-(see Step 3 error handling below). Do nothing here — proceed to Step 3.
+(see Step 3 error handling below). Do nothing here - proceed to Step 3.
 
-## Step 3 — Run initial scan
+## Step 3 - Run initial scan
 
 Call `mapi_run` with these arguments:
   api_target = "{api_target}"
@@ -1430,8 +1430,8 @@ Call `mapi_run` with these arguments:
   har = "{har_path}"
 
 Capture the full output as `scan_output`.
-A non-zero mapi exit (exit code 1 = findings present) is normal — the output is still returned.
-Exit codes 2 or 3 indicate real errors — surface them to the user and stop.
+A non-zero mapi exit (exit code 1 = findings present) is normal - the output is still returned.
+Exit codes 2 or 3 indicate real errors - surface them to the user and stop.
 
 **TLS error handling (applies to Step 3 and all evaluate_scan_quality calls):**
 If any tool call fails with an error mentioning TLS, certificate, "insecure", or
@@ -1445,7 +1445,7 @@ If any tool call fails with an error mentioning TLS, certificate, "insecure", or
   call for the rest of the session. Then retry the failed step with `insecure = true`.
 - If no: stop and tell the user to configure a trusted certificate.
 
-## Step 4 — Evaluate quality
+## Step 4 - Evaluate quality
 
 Call `evaluate_scan_quality` with:
   scan_output = <full output from Step 3>
@@ -1461,12 +1461,12 @@ Store the raw text output as `spec_param_table` for use in Step 4.5.
 Parse the evaluate_scan_quality JSON and show the user:
 - covered_pct (% of spec endpoints with at least one 2xx response)
 - total_endpoints and total_requests
-- auth_hints (if non-empty — these indicate auth is blocking the fuzzer)
+- auth_hints (if non-empty - these indicate auth is blocking the fuzzer)
 - unreachable_endpoints (if non-empty)
 
 Store this quality JSON for Step 4.5 and Step 5.
 
-## Step 4.5 — Source-aware seeding (optional)
+## Step 4.5 - Source-aware seeding (optional)
 
 After showing quality metrics, ask the user:
 "Is source code for this API available locally? If so, I can look for fixture
@@ -1475,11 +1475,11 @@ data, enum definitions, or seed values to help mapi cover low-coverage endpoints
 If the user says yes or provides a path:
 
   a. Look at endpoint_stats from the quality JSON. Identify endpoints where
-     ok_count == 0 and param_type includes PATH — these most need real entity values.
+     ok_count == 0 and param_type includes PATH - these most need real entity values.
      Show the user the specific PATH parameters you found.
 
   b. Ask: "I found these PATH parameters that likely need real entity values:
-     [list them]. Can you point me to files with valid values — fixture files,
+     [list them]. Can you point me to files with valid values - fixture files,
      enum definitions, test seeds, or database seeders?"
 
   c. For each file path the user provides, call read_file(<path>) and extract values
@@ -1501,7 +1501,7 @@ If the user says yes or provides a path:
   f. Present suggestions to the user:
      - For each `--resource-hint` suggestion: explain it seeds a specific parameter
        with a known-good value. Apply approved hints to current_args.
-       **Do NOT apply more than 3-5 resource hints total** — too many compress
+       **Do NOT apply more than 3-5 resource hints total** - too many compress
        the fuzzer's input entropy and reduce coverage diversity.
      - For each `--include-rule` or `--experimental-rules` suggestion: apply directly
        to current_args (these expand detection, no confirmation needed).
@@ -1511,7 +1511,7 @@ If the user says yes or provides a path:
 
 If the user skips: proceed directly to Step 5.
 
-## Step 5 — Tune loop (up to {max_iterations} total scan iterations)
+## Step 5 - Tune loop (up to {max_iterations} total scan iterations)
 
 Maintain `current_args` as a JSON object tracking the mapi_run arguments in use.
 Start with: {{"api_target": "{api_target}", "duration": "{duration}", "specification": "{specification}", "url": "{url}"}}
@@ -1548,7 +1548,7 @@ The initial scan (Step 3) is iteration 1. For each subsequent iteration:
      Show the updated covered_pct and request count to the user.
      Increment the iteration counter and return to step (a).
 
-## Step 6 — Emit scan script
+## Step 6 - Emit scan script
 
 Call `emit_scan_script` with:
   api_target      = "{api_target}"
@@ -1557,29 +1557,29 @@ Call `emit_scan_script` with:
   url             = "{url}"
   har_output_path = "{har_path}"
   extra_flags     = <list of flag-value pairs from current_args that are not positional args,
-                    in argv order — e.g. ["--header-auth", "Authorization: Bearer ${{TARGET_API_TOKEN}}",
+                    in argv order - e.g. ["--header-auth", "Authorization: Bearer ${{TARGET_API_TOKEN}}",
                     "--min-request-count", "200"]>
 
-Do not pass output_path — the script will be returned as text in the tool output.
+Do not pass output_path - the script will be returned as text in the tool output.
 Show the script to the user and tell them to save it to a file of their choosing.
 
 After showing the script, ask:
 "Would you like a .mapi config file for reuse or to commit to source control?
-This is most useful if (a) you want correlated parameter groups — e.g., username
+This is most useful if (a) you want correlated parameter groups - e.g., username
 and userStatus always seeded together, or (b) you want to store suppressions in SCM
 so the team shares the same ignore rules. If you just need to run the scan once,
 the bash script is sufficient."
 
 If yes: call `emit_mapi_config` with:
-  resource_hint_groups = <list of hint groups — put correlated hints in the same group,
+  resource_hint_groups = <list of hint groups - put correlated hints in the same group,
                           unrelated hints each in their own single-item group>
   suppressed_rules     = <list of any --ignore-rule values the user confirmed>
-  (omit output_path — return as text so the user can save it)
+  (omit output_path - return as text so the user can save it)
 Show the YAML and tell the user to save it as `.mapi` in their project root.
 
 If no or skipping: proceed to Step 7.
 
-## Step 7 — Summary
+## Step 7 - Summary
 
 Present a final summary to the user:
 1. Final quality metrics from the last evaluate_scan_quality: covered_pct, total_endpoints, total_requests.
@@ -1595,7 +1595,7 @@ Present a final summary to the user:
 **Important implementation notes:**
 - Always pass `har = "{har_path}"` to every mapi_run call. Without it, evaluate_scan_quality
   cannot parse the HAR and will fail.
-- RunArgs has a `har` field directly — do not use extra_flags for the HAR path.
+- RunArgs has a `har` field directly - do not use extra_flags for the HAR path.
 - The `current_args_json` for suggest_tune_changes should use Python-style snake_case key names
   matching RunArgs fields (e.g., "header_auth", "min_request_count", "duration").
 - emit_scan_script's extra_flags takes argv-order tokens (["--flag", "value", ...]),
@@ -1605,11 +1605,11 @@ Present a final summary to the user:
   Once set, pass `insecure = true` to every evaluate_scan_quality and
   mapi_describe_specification call for the remainder of the session. Do not reset it.
 - Step 4.5 resource hints: keep the total count at 3-5 maximum. More hints compress
-  fuzzer entropy — mapi applies them on >90% of requests.
+  fuzzer entropy - mapi applies them on >90% of requests.
 - suggest_source_aware_changes returns rule suggestions in the same schema as
   suggest_tune_changes. --include-rule and --experimental-rules need no confirmation;
   --ignore-rule always requires explicit yes/no (carries [FUZZING NARROWING WARNING]).
-- emit_mapi_config is optional and conditional — only offer it when correlated groups
+- emit_mapi_config is optional and conditional - only offer it when correlated groups
   or SCM-stored suppressions genuinely add value over the bash script alone.
 """
 
