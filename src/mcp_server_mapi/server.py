@@ -1270,6 +1270,9 @@ class SuggestSourceAwareChangesArgs(BaseModel):
     Credential-named parameters are flagged as informational - never auto-suggested as hints.
     Limits resource hint suggestions to a small set (3-5) to preserve fuzzer input entropy.
     Call mapi_describe_specification first to get spec_output.
+    Hint values are substituted verbatim into requests - emit a concrete conforming
+    example (e.g. 'FLEET-NA-001'), never a regex or pattern. A regex value is sent
+    as a literal string and will fail any real format validation.
     """
 )
 def suggest_source_aware_changes(args: SuggestSourceAwareChangesArgs) -> str:
@@ -1503,6 +1506,9 @@ If the user says yes or provides a path:
        with a known-good value. Apply approved hints to current_args.
        **Do NOT apply more than 3-5 resource hints total** - too many compress
        the fuzzer's input entropy and reduce coverage diversity.
+       **IMPORTANT: hint values must be concrete examples, not patterns or regexes.
+       For example, use 'FLEET-NA-001' not 'FLEET-[A-Z]{{2}}-[0-9]{{3}}'.
+       Extract a real value from the source file the user pointed to.**
      - For each `--include-rule` or `--experimental-rules` suggestion: apply directly
        to current_args (these expand detection, no confirmation needed).
      - For any `--ignore-rule` suggestion: show the [FUZZING NARROWING WARNING] and
