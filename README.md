@@ -106,6 +106,48 @@ parameter groups (multiple parameters seeded together consistently) or want to
 commit suppressions to source control for team sharing. For one-off scans, the
 emitted bash script is sufficient.
 
+### Capability 3 — Exploit Generation
+
+> [!WARNING]
+> The server **never sends** exploit requests. All output is text for the user
+> to review and decide whether to run. Obtain appropriate authorization before
+> executing any suggested request.
+
+For each defect found by a mapi run, the `/generate-exploit` prompt confirms
+the defect still reproduces, crafts a targeted HTTP request demonstrating its
+impact, and emits a leave-behind markdown report.
+
+**How to invoke:**
+
+In your MCP client, invoke `/generate-exploit` with:
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `run_id` | yes | — | Mayhem run ID containing the defects (e.g. `myorg/api/42`) |
+| `url` | yes | — | Base URL of the API under test |
+| `specification` | no | `""` | Spec path for endpoint context |
+| `source_dir` | no | `""` | Source root for higher-fidelity exploit crafting |
+| `output_path` | no | `exploit-report.md` | Path for the leave-behind report |
+
+**Leave-behind tool:**
+
+`emit_exploit_report` generates a markdown file with one section per defect:
+the reproducing request, the suggested exploit, and source code references if
+available.
+
+**Safety boundary:**
+
+- The server never issues HTTP requests to the API — the exploit suggestion is
+  text only; the user manually copies and runs it
+- Any suggestion that would mutate or delete server state (account changes, data
+  deletion, DoS) is tagged **`[DESTRUCTIVE]`** and requires explicit user
+  confirmation before it is included in the report
+- Credentials or tokens observed in defect data are replaced with typed
+  placeholders (`<BEARER_TOKEN>`, `<PASSWORD>`, etc.) — real values are never
+  written to the report
+- Safety warnings appear at four points: prompt start, before each exploit is
+  crafted, at the destructive-action gate, and after the report is generated
+
 ## Usage
 
 MCP servers are designed to be used with AI applications like Claude, Cursor, or
