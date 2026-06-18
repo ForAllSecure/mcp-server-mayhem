@@ -1777,7 +1777,13 @@ For each defect in the list, work through steps (a)–(f):
        url        = "{url}"
        (plus any auth parameters you have in current_args: header_auth, basic_auth, cookie_auth)
 
-     Exit code 1 = still reproduces. Exit code 0 = no longer reproduces - note this and skip to next defect.
+     Exit code 1 = still reproduces. Exit code 0 = no longer reproduces.
+       - For most defect classes: note this and skip to next defect.
+       - EXCEPTION — `sql-injection` class: do NOT skip. Continue to step (c) using
+         source/heuristics to craft a UNION SELECT. In the finding, note: "Original payload
+         did not reproduce on replay (boolean probe returns 200); exploit crafted from
+         injection-sink analysis." Boolean/blind SQLi defects frequently fail replay even
+         when the injection sink is real.
      Do NOT prompt the user for auth again; reuse what was used in the original scan.
 
   b. **Reminder: you are crafting a SUGGESTION only. Do not attempt to verify the
@@ -1826,7 +1832,7 @@ source code if available:
 | `sql-injection` | UNION SELECT targeting sensitive tables. Start: `' UNION SELECT table_name,null,null FROM information_schema.tables-- `. Then target: users, accounts, credentials. Use `region=' UNION SELECT email,password,'x' FROM users-- ` pattern. Boolean blind: `AND 1=1` vs `AND 1=2`. | No (SELECT only) |
 | `sql-injection` (mutating) | INSERT/UPDATE/DELETE/DROP payloads | YES - tag [DESTRUCTIVE] |
 | `path-traversal` | `../../etc/passwd`, `../../etc/shadow`. Windows: `..\\..\\..\\windows\\system32\\drivers\\etc\\hosts`. Null-byte: `../../etc/passwd%00.jpg` | No (read-only) |
-| `server-crash` / `internal-server-error` | Reproduce the minimal crashing payload from replay. Note if crash is OOM/resource-exhaustion (DoS) vs parsing bug. | DoS = YES [DESTRUCTIVE]; parsing bug = No |
+| `server-crash` / `internal-server-error` | Reproduce the minimal crashing payload from replay. Note if crash is OOM/resource-exhaustion (DoS) vs parsing bug. **DB-traceback escalation:** if the replay output contains a database error traceback (e.g. `sqlite3`, `psycopg2`, `sqlalchemy`, `ORA-`, `mysql.connector`), also craft a UNION SELECT exploit per the `sql-injection` row — the ISE is evidence of an injection sink. Label the finding with both rules: `internal-server-error` (error disclosure) and `sql-injection` (UNION exploit). | DoS = YES [DESTRUCTIVE]; parsing bug = No; UNION SELECT = No |
 | `ssrf` | AWS: `http://169.254.169.254/latest/meta-data/`. GCP: `http://metadata.google.internal/computeMetadata/v1/`. Azure: `http://169.254.169.254/metadata/instance`. Internal: `http://localhost:6379` (Redis), `http://localhost:27017` (MongoDB). | No (reconnaissance) |
 | `auth-bypass` | Send the request without any Authorization header. Also try: empty token (`Authorization: Bearer `), `null` literal, another user's token. Note what data is exposed. | Depends on endpoint |
 | `verb-tampering` | Try alternate HTTP verbs (GET instead of POST, DELETE on read-only). Check if auth is bypassed or protected data is returned. | Depends on endpoint |
