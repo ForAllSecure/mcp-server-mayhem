@@ -174,6 +174,15 @@ Call `emit_scan_script` with:
                     in argv order - e.g. ["--header-auth", "Authorization: Bearer ${TARGET_API_TOKEN}",
                     "--min-request-count", "200"]>
 
+**Before building extra_flags:** scan current_args for any header_auth, basic_auth, or
+cookie_auth values. If a value does not already contain a `${VAR}` reference (i.e. it is
+a literal token, password, or session string), replace it with the appropriate placeholder:
+- Bearer/API key headers: `Authorization: Bearer ${TARGET_API_TOKEN}`
+- Basic auth: `${TARGET_API_USER}:${TARGET_API_PASS}`
+- Cookie auth: `${SESSION_COOKIE}`
+Never write a literal credential value into extra_flags. The emitted script must read
+secrets from the environment, not contain them inline.
+
 Do not pass output_path - the script will be returned as text in the tool output.
 Show the script to the user and tell them to save it to a file of their choosing.
 
@@ -225,3 +234,6 @@ Present a final summary to the user:
   --ignore-rule always requires explicit yes/no (carries [FUZZING NARROWING WARNING]).
 - emit_mapi_config is optional and conditional - only offer it when correlated groups
   or SCM-stored suppressions genuinely add value over the bash script alone.
+- Auth values in extra_flags must always be env-var references (e.g. `${TARGET_API_TOKEN}`),
+  never literal tokens or passwords. Replace any literal values before calling emit_scan_script.
+  The emit_scan_script tool auto-generates :? env guards for every ${VAR} it detects.
