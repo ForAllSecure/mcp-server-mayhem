@@ -917,7 +917,7 @@ def emit_scan_script(args: EmitScanScriptArgs) -> str:
         except PermissionError as e:
             raise RuntimeError(str(e)) from None
         out_path.write_text(script)
-        os.chmod(out_path, 0o755)
+        os.chmod(out_path, 0o700)
         return f"Script written to {out_path}\n\n{script}"
     return script
 
