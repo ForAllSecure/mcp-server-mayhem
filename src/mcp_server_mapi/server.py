@@ -147,6 +147,43 @@ def parse_duration(raw: str) -> float:
     return h * 3600.0 + mn * 60.0 + s
 
 
+def _assert_under_cwd(p: Path) -> Path:
+    resolved = p.resolve()
+    cwd = Path.cwd().resolve()
+    if not resolved.is_relative_to(cwd):
+        raise PermissionError(
+            f"Path '{p}' resolves to '{resolved}', which is outside the "
+            f"project root '{cwd}'. Paths must be relative to the working directory."
+        )
+    return resolved
+
+
+_CREDENTIAL_FLAGS: frozenset[str] = frozenset({
+    "--basic-auth",
+    "--header-auth",
+    "--cookie-auth",
+    "--p12password",
+    "--oauth2-client-data",
+    "--oauth2-credentials",
+    "--postman-api-key",
+})
+
+
+def _redact_cmd(cmd: list[str]) -> list[str]:
+    result: list[str] = []
+    redact_next = False
+    for token in cmd:
+        if redact_next:
+            result.append("<redacted>")
+            redact_next = False
+        elif token in _CREDENTIAL_FLAGS:
+            result.append(token)
+            redact_next = True
+        else:
+            result.append(token)
+    return result
+
+
 # -----------------------------
 # MCP tool for `mapi discover`
 # -----------------------------
@@ -229,7 +266,7 @@ async def mapi_discover(args: DiscoverArgs, ctx: Context | None = None) -> str:
     _add_opt(cmd, "--oauth2-password-refresh-url", args.oauth2_password_refresh_url)
     _add_repeat(cmd, "--oauth2-password-scopes", args.oauth2_password_scopes)
 
-    cmd_str = "$ " + shlex.join(cmd)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
     log.info("Running: %s", cmd_str[2:])
     try:
         out = await run_cli(cmd, timeout_s=600.0, ctx=ctx)
@@ -490,7 +527,7 @@ async def mapi_run(args: RunArgs, ctx: Context | None = None) -> str:
     _add_opt(cmd, "--p12cert", args.p12cert)
     _add_opt(cmd, "--p12password", args.p12password)
 
-    cmd_str = "$ " + shlex.join(cmd)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
     log.info("Running: %s", cmd_str[2:])
     try:
         out = await run_cli(cmd, timeout_s=args.process_timeout, ctx=ctx)
@@ -523,7 +560,7 @@ async def mapi_target_list(args: TargetListArgs, ctx: Context | None = None) -> 
     cmd: list[str] = [MAPI_BIN, "target", "list"]
     _add_flag(cmd, args.show_dates, "--show-dates")
     _add_opt(cmd, "--max-items", args.max_items)
-    cmd_str = "$ " + shlex.join(cmd)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
     log.info("Running: %s", cmd_str[2:])
     try:
         out = await run_cli(cmd, ctx=ctx)
@@ -558,7 +595,7 @@ async def mapi_describe_specification(args: DescribeSpecificationArgs, ctx: Cont
     if args.insecure:
         cmd.append("-k")
     cmd.append(args.spec_path)
-    cmd_str = "$ " + shlex.join(cmd)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
     log.info("Running: %s", cmd_str[2:])
     try:
         out = await run_cli(cmd, timeout_s=30.0, ctx=ctx)
@@ -592,7 +629,7 @@ async def mapi_defect_list(args: DefectListArgs, ctx: Context | None = None) -> 
     _add_flag(cmd, args.include_suppressed, "--include-suppressed")
     _add_opt(cmd, "--max-items", args.max_items)
     cmd.append(args.run_id)
-    cmd_str = "$ " + shlex.join(cmd)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
     log.info("Running: %s", cmd_str[2:])
     try:
         out = await run_cli(cmd, ctx=ctx)
@@ -639,7 +676,7 @@ async def mapi_defect_replay(args: DefectReplayArgs, ctx: Context | None = None)
     cmd.append(args.run_id)
     if args.specification:
         cmd.append(args.specification)
-    cmd_str = "$ " + shlex.join(cmd)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
     log.info("Running: %s", cmd_str[2:])
     try:
         out = await run_cli(cmd, ctx=ctx)
@@ -852,10 +889,10 @@ def emit_scan_script(args: EmitScanScriptArgs) -> str:
     # Build mapi run invocation with backslash continuation
     all_flags = args.extra_flags
     positional_and_opts = [
-        f"  {args.api_target} \\",
-        f"  {args.duration} \\",
-        f"  {args.specification} \\",
-        f"  --url {args.url} \\",
+        f"  {shlex.quote(args.api_target)} \\",
+        f"  {shlex.quote(args.duration)} \\",
+        f"  {shlex.quote(args.specification)} \\",
+        f"  --url {shlex.quote(args.url)} \\",
         # f"  --har {args.har_output_path}",
     ]
     if all_flags:
@@ -875,9 +912,13 @@ def emit_scan_script(args: EmitScanScriptArgs) -> str:
     ])
 
     if args.output_path:
-        Path(args.output_path).write_text(script)
-        os.chmod(args.output_path, 0o755)
-        return f"Script written to {args.output_path}\n\n{script}"
+        try:
+            out_path = _assert_under_cwd(Path(args.output_path))
+        except PermissionError as e:
+            raise RuntimeError(str(e)) from None
+        out_path.write_text(script)
+        os.chmod(out_path, 0o755)
+        return f"Script written to {out_path}\n\n{script}"
     return script
 
 
@@ -1387,8 +1428,12 @@ def emit_mapi_config(args: EmitMapiConfigArgs) -> str:
     config = "\n".join(lines)
 
     if args.output_path:
-        Path(args.output_path).write_text(config)
-        return f"Config written to {args.output_path}\n\n{config}"
+        try:
+            out_path = _assert_under_cwd(Path(args.output_path))
+        except PermissionError as e:
+            raise RuntimeError(str(e)) from None
+        out_path.write_text(config)
+        return f"Config written to {out_path}\n\n{config}"
     return config
 
 
@@ -1492,8 +1537,12 @@ def emit_exploit_report(args: EmitExploitReportArgs) -> str:
     report = "".join(sections)
 
     if args.output_path:
-        Path(args.output_path).write_text(report)
-        return f"Report written to {args.output_path}\n\n{report}"
+        try:
+            out_path = _assert_under_cwd(Path(args.output_path))
+        except PermissionError as e:
+            raise RuntimeError(str(e)) from None
+        out_path.write_text(report)
+        return f"Report written to {out_path}\n\n{report}"
     return report
 
 
@@ -1549,42 +1598,6 @@ async def generate_exploit(
     )
 
 
-@mcp.tool(description="Execute arbitrary bash commands on the MAPI server host - this is useful to inspect or manipulate mapi findings.")
-async def bash(command: str, cwd: str | None = None) -> str:
-    """Execute bash commands.
-
-    Args:
-        command: The bash command to execute
-        cwd: Working directory for the command (optional)
-    """
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-        )
-
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-            exit_code = proc.returncode or 0
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return "Error: Command timed out after 1 minute"
-
-        output = f"Command executed with exit code: {exit_code}\n\n"
-        if stdout:
-            output += f"STDOUT:\n{stdout.decode()}\n"
-        if stderr:
-            output += f"STDERR:\n{stderr.decode()}\n"
-
-        return output
-
-    except Exception as e:
-        return f"Error executing command: {str(e)}"
-
-
 @mcp.tool(description="Read contents of a file on the MAPI server host, optionally specifying line range.")
 def read_file(
     file_path: str, line_start: int | None = None, line_end: int | None = None
@@ -1597,7 +1610,10 @@ def read_file(
         line_end: Ending line number (1-based, optional)
     """
     try:
-        path = Path(file_path)
+        try:
+            path = _assert_under_cwd(Path(file_path))
+        except PermissionError as e:
+            return f"Error: {e}"
         if not path.exists():
             return f"Error: File not found at {file_path}"
 
@@ -1647,7 +1663,10 @@ def edit_file(
         replace_all: If True, replace all occurrences; if False, replace only first occurrence
     """
     try:
-        path = Path(file_path)
+        try:
+            path = _assert_under_cwd(Path(file_path))
+        except PermissionError as e:
+            return f"Error: {e}"
         if not path.exists():
             return f"Error: File not found at {file_path}"
 
