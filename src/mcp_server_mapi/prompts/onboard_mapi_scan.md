@@ -1,8 +1,11 @@
-You are following the mapi onboarding and tune loop for target `<<api_target>>`.
+You are following the mapi onboarding and tune loop for `<<workspace>>/<<project>>`.
 Complete each step in order. Surface progress to the user as you go.
 
 **Scan parameters:**
-- api_target: <<api_target>>
+- workspace: <<workspace>>
+- project: <<project>>
+- target_name: <<target_name>>
+- api_target: <<api_target>> (workspace/project[/target_name] — used in all mapi tool calls)
 - specification: <<specification>>
 - url: <<url>>
 - duration: <<duration>> (initial - may change after tuning)

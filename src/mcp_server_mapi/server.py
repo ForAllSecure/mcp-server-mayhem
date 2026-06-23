@@ -1554,16 +1554,22 @@ def emit_exploit_report(args: EmitExploitReportArgs) -> str:
     description="Orchestrate the mapi onboarding and tune loop: walk through setup, run a scan, evaluate quality, suggest tuning changes, and emit a final leave-behind scan script.",
 )
 async def onboard_mapi_scan(
-    api_target: str,
+    workspace: str,
+    project: str,
     specification: str,
     url: str,
+    target_name: str = "",
     duration: str = "30s",
     max_iterations: int = 3,
     min_covered_pct: int = 25,
 ) -> str:
-    har_path = f"/tmp/mapi-onboard-{api_target.replace('/', '-')}.har"
+    api_target = f"{workspace}/{project}/{target_name}" if target_name else f"{workspace}/{project}"
+    har_path = f"/tmp/mapi-onboard-{workspace}-{project}.har"
     return _render(
         _load_prompt_template("onboard_mapi_scan.md"),
+        workspace=workspace,
+        project=project,
+        target_name=target_name if target_name else "(none)",
         api_target=api_target,
         specification=specification,
         url=url,

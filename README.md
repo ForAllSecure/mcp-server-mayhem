@@ -49,7 +49,9 @@ In your MCP client, invoke `/onboard-mapi-scan` with the following arguments:
 
 | Argument | Required | Default | Description |
 |---|---|---|---|
-| `api_target` | yes | - | Mayhem project target (e.g. `myorg/api`) |
+| `workspace` | yes | — | Mayhem workspace name (e.g. `myorg`) |
+| `project` | yes | — | Mayhem project name (e.g. `my-api`) |
+| `target_name` | no | `""` | Specific target within the project; omit to use the project default |
 | `specification` | yes | - | Path to an OpenAPI/Swagger/Postman spec file |
 | `url` | yes | - | Base URL of the API under test |
 | `duration` | no | `30s` | Initial scan duration |
