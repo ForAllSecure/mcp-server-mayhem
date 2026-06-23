@@ -1,14 +1,18 @@
 from __future__ import annotations
 from pathlib import Path
 import asyncio
+import json
 import os
 import re
+import shlex
 import sys
 import logging
+from importlib.resources import files as _pkg_files
 from typing import Literal, List, Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, model_validator, field_validator
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 
 # --- Logging: IMPORTANT ---
 # Never write to stdout on stdio servers (keeps JSON-RPC clean).
@@ -23,6 +27,21 @@ from .cli_runner import run_cli, CLIRuntimeError
 
 MAPI_BIN = os.environ.get("MAPI_BIN", "/usr/local/bin/mapi")  # override in env if needed
 mcp = FastMCP("MAPI Server")
+
+
+def _load_prompt_template(name: str) -> str:
+    return (
+        _pkg_files("mcp_server_mapi")
+        .joinpath("prompts")
+        .joinpath(name)
+        .read_text(encoding="utf-8")
+    )
+
+
+def _render(template: str, **kwargs: str) -> str:
+    for key, value in kwargs.items():
+        template = template.replace(f"<<{key}>>", value)
+    return template
 
 
 # -----------------------------
@@ -128,6 +147,43 @@ def parse_duration(raw: str) -> float:
     return h * 3600.0 + mn * 60.0 + s
 
 
+def _assert_under_cwd(p: Path) -> Path:
+    resolved = p.resolve()
+    cwd = Path.cwd().resolve()
+    if not resolved.is_relative_to(cwd):
+        raise PermissionError(
+            f"Path '{p}' resolves to '{resolved}', which is outside the "
+            f"project root '{cwd}'. Paths must be relative to the working directory."
+        )
+    return resolved
+
+
+_CREDENTIAL_FLAGS: frozenset[str] = frozenset({
+    "--basic-auth",
+    "--header-auth",
+    "--cookie-auth",
+    "--p12password",
+    "--oauth2-client-data",
+    "--oauth2-credentials",
+    "--postman-api-key",
+})
+
+
+def _redact_cmd(cmd: list[str]) -> list[str]:
+    result: list[str] = []
+    redact_next = False
+    for token in cmd:
+        if redact_next:
+            result.append("<redacted>")
+            redact_next = False
+        elif token in _CREDENTIAL_FLAGS:
+            result.append(token)
+            redact_next = True
+        else:
+            result.append(token)
+    return result
+
+
 # -----------------------------
 # MCP tool for `mapi discover`
 # -----------------------------
@@ -143,7 +199,7 @@ def parse_duration(raw: str) -> float:
 
     """
 )
-async def mapi_discover(args: DiscoverArgs) -> str:
+async def mapi_discover(args: DiscoverArgs, ctx: Context | None = None) -> str:
     cmd: list[str] = [MAPI_BIN, "discover"]
 
     # FLAGS
@@ -210,12 +266,13 @@ async def mapi_discover(args: DiscoverArgs) -> str:
     _add_opt(cmd, "--oauth2-password-refresh-url", args.oauth2_password_refresh_url)
     _add_repeat(cmd, "--oauth2-password-scopes", args.oauth2_password_scopes)
 
-    # Run it
-    log.info("Running: %s", " ".join(cmd))
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
+    log.info("Running: %s", cmd_str[2:])
     try:
-        return await run_cli(cmd, timeout_s=600.0)
-    except CLIRuntimeError as e:  # only raised on timeout, not non-zero exit
-        raise RuntimeError(str(e)) from None
+        out = await run_cli(cmd, timeout_s=600.0, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
+    except CLIRuntimeError as e:
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
 
 
 # -----------------------------
@@ -290,7 +347,16 @@ class RunArgs(BaseModel):
     cookie_auth: List[str] = Field(default_factory=list)           # --cookie-auth
     header_auth: List[str] = Field(default_factory=list)           # --header-auth
     query_auth: List[str] = Field(default_factory=list)            # --query-auth
-    resource_hint: List[str] = Field(default_factory=list)         # --resource-hint
+    resource_hint: List[str] = Field(
+        default_factory=list,
+        description=(
+            "--resource-hint values seeding named parameters with concrete examples. "
+            "Format: `[METHOD /path PARAM_TYPE] name$:value` — separator is `$:`. "
+            "Examples: \"fleet_id$:FLEET-NA-001\", "
+            "\"GET /telemetry QUERY fleet_id$:FLEET-NA-001\". "
+            "Repeatable; each entry seeds one parameter value."
+        ),
+    )
     include_endpoint: List[str] = Field(default_factory=list)      # --include-endpoint
     ignore_endpoint: List[str] = Field(default_factory=list)       # --ignore-endpoint
     include_endpoints_by_tag: List[str] = Field(default_factory=list)
@@ -365,7 +431,7 @@ class RunArgs(BaseModel):
     report at the end.
     """
 )
-async def mapi_run(args: RunArgs) -> str:
+async def mapi_run(args: RunArgs, ctx: Context | None = None) -> str:
     cmd: list[str] = [MAPI_BIN, "run"]
 
     # first, the required positionals:
@@ -470,50 +536,1092 @@ async def mapi_run(args: RunArgs) -> str:
     _add_opt(cmd, "--p12cert", args.p12cert)
     _add_opt(cmd, "--p12password", args.p12password)
 
-    log.info("Running: %s", " ".join(cmd))
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
+    log.info("Running: %s", cmd_str[2:])
     try:
-        return await run_cli(cmd, timeout_s=args.process_timeout)
-    except CLIRuntimeError as e:  # only raised on timeout, not non-zero exit
-        raise RuntimeError(str(e)) from None
+        out = await run_cli(cmd, timeout_s=args.process_timeout, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
+    except CLIRuntimeError as e:
+        if e.exit_code == 1:
+            return f"{cmd_str}\n\n{e.stdout}"
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
 
 
-@mcp.tool(description="Execute arbitrary bash commands on the MAPI server host - this is useful to inspect or manipulate mapi findings.")
-async def bash(command: str, cwd: str | None = None) -> str:
-    """Execute bash commands.
+# -----------------------------
+# Pydantic schema for `mapi target list`
+# -----------------------------
+class TargetListArgs(BaseModel):
+    show_dates: bool = Field(False, description="--show-dates: display the date each target was added and last updated")
+    max_items: int = Field(100, ge=1, description="--max-items <int>: maximum number of targets to return (default: 100)")
 
-    Args:
-        command: The bash command to execute
-        cwd: Working directory for the command (optional)
+
+# -----------------------------
+# MCP tool for `mapi target list`
+# -----------------------------
+@mcp.tool(
+    description="""
+    List the mapi targets registered for the current user account.
+    Returns a table of project/target pairs available for scanning with `mapi run`.
+    Use this to discover existing targets before starting a new scan.
     """
+)
+async def mapi_target_list(args: TargetListArgs, ctx: Context | None = None) -> str:
+    cmd: list[str] = [MAPI_BIN, "target", "list"]
+    _add_flag(cmd, args.show_dates, "--show-dates")
+    _add_opt(cmd, "--max-items", args.max_items)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
+    log.info("Running: %s", cmd_str[2:])
     try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
+        out = await run_cli(cmd, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
+    except CLIRuntimeError as e:
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
+
+
+# -----------------------------
+# Pydantic schema for `mapi describe specification`
+# -----------------------------
+class DescribeSpecificationArgs(BaseModel):
+    spec_path: str = Field(..., description="path or URL to an OpenAPI/Swagger/Postman/HAR spec")
+    insecure: bool = Field(False, description="-k: skip TLS certificate verification when spec_path is an https:// URL with a self-signed certificate")
+
+
+# -----------------------------
+# MCP tool: mapi_describe_specification
+# -----------------------------
+@mcp.tool(
+    description="""
+    Run `mapi describe specification` and return the full resource table for an API spec.
+    Output is one line per parameter: `METHOD /path PARAM_TYPE param_name`.
+    Zero-parameter endpoints appear as `METHOD /path`.
+    Use this to enumerate all endpoints and their parameters before configuring resource hints,
+    endpoint filters, or evaluating scan coverage.
+    Pass insecure=true when the spec URL uses a self-signed TLS certificate.
+    """
+)
+async def mapi_describe_specification(args: DescribeSpecificationArgs, ctx: Context | None = None) -> str:
+    cmd: list[str] = [MAPI_BIN, "describe", "specification"]
+    if args.insecure:
+        cmd.append("-k")
+    cmd.append(args.spec_path)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
+    log.info("Running: %s", cmd_str[2:])
+    try:
+        out = await run_cli(cmd, timeout_s=30.0, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
+    except CLIRuntimeError as e:
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
+
+
+# -----------------------------
+# Pydantic schema for `mapi defect list`
+# -----------------------------
+class DefectListArgs(BaseModel):
+    run_id: str = Field(..., description="run ID to fetch defects for, e.g. 'workspace/project/target/12'")
+    max_items: int = Field(100, ge=1, description="--max-items: maximum number of defects to return (default: 100)")
+    include_suppressed: bool = Field(False, description="--include-suppressed: include suppressed defects in output")
+
+
+# -----------------------------
+# MCP tool: mapi_defect_list
+# -----------------------------
+@mcp.tool(
+    description="""
+    List defects discovered during a previous mapi run.
+    Returns a table of defect IDs, rules, and endpoints for the specified run ID.
+    Use this to inspect what vulnerabilities a completed scan found, or to obtain
+    defect IDs for replay with mapi_defect_replay.
+    """
+)
+async def mapi_defect_list(args: DefectListArgs, ctx: Context | None = None) -> str:
+    cmd: list[str] = [MAPI_BIN, "defect", "list"]
+    _add_flag(cmd, args.include_suppressed, "--include-suppressed")
+    _add_opt(cmd, "--max-items", args.max_items)
+    cmd.append(args.run_id)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
+    log.info("Running: %s", cmd_str[2:])
+    try:
+        out = await run_cli(cmd, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
+    except CLIRuntimeError as e:
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
+
+
+# -----------------------------
+# Pydantic schema for `mapi defect replay`
+# -----------------------------
+class DefectReplayArgs(BaseModel):
+    run_id: str = Field(..., description="run ID to replay defects from, e.g. 'workspace/project/target/12'")
+    defect_ids: List[str] = Field(default_factory=list, description="-d/--defect: specific defect IDs to replay (repeatable); if empty, all defects from the run are replayed")
+    specification: Optional[str] = Field(None, description="optional path or URL to a spec to replay against - useful for verifying a fix in an updated spec")
+    url: Optional[str] = Field(None, description="--url: override the server URL for the API under test")
+    include_suppressed: bool = Field(False, description="--include-suppressed: include suppressed defects in replay")
+    verify_tls: bool = Field(False, description="--verify-tls: validate TLS certificates when communicating with the target API")
+    header_auth: List[str] = Field(default_factory=list, description='--header-auth "Authorization:Bearer token" - auth header for the TARGET API (repeatable)')
+    cookie_auth: List[str] = Field(default_factory=list, description='--cookie-auth "sessionId=xyz" (repeatable)')
+    basic_auth: Optional[str] = Field(None, description='--basic-auth "username:password"')
+
+
+# -----------------------------
+# MCP tool: mapi_defect_replay
+# -----------------------------
+@mcp.tool(
+    description="""
+    Replay defects from a previous mapi run to check whether they still reproduce.
+    Exit code 1 (defects still reproduce) is treated as a normal result and returned as output.
+    Optionally replay against an updated spec or URL to verify that a fix is effective.
+    Use defect_ids to replay specific defects; omit to replay all defects from the run.
+    """
+)
+async def mapi_defect_replay(args: DefectReplayArgs, ctx: Context | None = None) -> str:
+    cmd: list[str] = [MAPI_BIN, "defect", "replay"]
+    _add_flag(cmd, args.verify_tls, "--verify-tls")
+    _add_flag(cmd, args.include_suppressed, "--include-suppressed")
+    _add_opt(cmd, "--url", args.url)
+    _add_opt(cmd, "--basic-auth", args.basic_auth)
+    _add_repeat(cmd, "--cookie-auth", args.cookie_auth)
+    _add_repeat(cmd, "--header-auth", args.header_auth)
+    _add_repeat(cmd, "--defect", args.defect_ids)
+    cmd.append(args.run_id)
+    if args.specification:
+        cmd.append(args.specification)
+    cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
+    log.info("Running: %s", cmd_str[2:])
+    try:
+        out = await run_cli(cmd, ctx=ctx)
+        return f"{cmd_str}\n\n{out}"
+    except CLIRuntimeError as e:
+        if e.exit_code == 1:
+            return f"{cmd_str}\n\n{e.stdout}"
+        raise RuntimeError(f"{cmd_str}\n\n{e}") from None
+
+
+# -----------------------------
+# Helpers for evaluate_scan_quality
+# -----------------------------
+def _spec_path_regex(spec_path: str) -> re.Pattern:
+    """Compile a spec path with {param} placeholders into a regex for HAR path matching."""
+    parts = spec_path.split("/")
+    pattern_parts = []
+    for part in parts:
+        if part.startswith("{") and part.endswith("}"):
+            pattern_parts.append("[^/]+")
+        elif part:
+            pattern_parts.append(re.escape(part))
+    pattern = "/".join(pattern_parts)
+    return re.compile(f"(?:^|/){pattern}(?:/|$)")
+
+
+# -----------------------------
+# Pydantic schema for evaluate_scan_quality
+# -----------------------------
+class EvaluateScanQualityArgs(BaseModel):
+    scan_output: str = Field(..., description="stdout captured from mapi run")
+    har_path: str = Field(..., description="filesystem path to the HAR file produced by the scan (requires --har <path> on the mapi run invocation)")
+    spec_path: str = Field(..., description="filesystem path or URL to the OpenAPI/Swagger/Postman spec used for the scan")
+    insecure: bool = Field(False, description="pass -k to mapi describe specification to skip TLS certificate verification - use when spec_path is an https:// URL with a self-signed certificate")
+
+
+# -----------------------------
+# MCP tool: evaluate_scan_quality
+# -----------------------------
+@mcp.tool(
+    description="""
+    Evaluate the quality of a completed mapi scan by parsing the HAR file and API spec.
+    Returns a JSON string with endpoint coverage percentage, auth hints extracted from
+    401/403 responses, and per-endpoint request/2xx/status stats.
+    Use this after mapi_run to decide whether to tune scan parameters further.
+    Requires the scan to have been run with --har <path> to produce a HAR file.
+    """
+)
+async def evaluate_scan_quality(args: EvaluateScanQualityArgs, ctx: Context | None = None) -> str:
+    # 1. Extract spec endpoints via mapi describe specification
+    spec = args.spec_path
+    if not (spec.startswith("http://") or spec.startswith("https://")):
+        if not Path(spec).exists():
+            raise RuntimeError(
+                f"Spec file not found: {spec!r}. "
+                "Pass the spec as an https:// URL or a valid local file path."
+            )
+    describe_cmd = [MAPI_BIN, "describe", "specification"]
+    if args.insecure:
+        describe_cmd.append("-k")
+    describe_cmd.append(spec)
+    describe_cmd_str = "$ " + shlex.join(describe_cmd)
+    log.info("Running: %s", describe_cmd_str[2:])
+    try:
+        spec_output = await run_cli(describe_cmd, timeout_s=30.0)
+    except CLIRuntimeError as e:
+        raise RuntimeError(f"{describe_cmd_str}\n\n{e}") from None
+
+    seen: set[tuple[str, str]] = set()
+    spec_endpoints: list[tuple[str, str]] = []
+    for line in spec_output.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            key = (parts[0].upper(), parts[1])
+            if key not in seen:
+                seen.add(key)
+                spec_endpoints.append(key)
+
+    # Compile path matchers for each unique spec endpoint
+    spec_patterns = [(m, p, _spec_path_regex(p)) for m, p in spec_endpoints]
+
+    # 2. Parse HAR
+    har_file = Path(args.har_path)
+    if not har_file.exists():
+        raise RuntimeError(f"HAR file not found: {args.har_path}")
+    try:
+        har = json.loads(har_file.read_text())
+        entries = har.get("log", {}).get("entries", [])
+    except (json.JSONDecodeError, KeyError) as e:
+        raise RuntimeError(f"Failed to parse HAR file: {e}") from None
+
+    # 3. Per-endpoint stats
+    stats: dict[tuple[str, str], dict] = {
+        (m, p): {"request_count": 0, "ok_count": 0, "status_breakdown": {}}
+        for m, p in spec_endpoints
+    }
+    auth_hints_set: set[str] = set()
+    total_requests = len(entries)
+
+    for entry in entries:
+        req = entry.get("request", {})
+        resp = entry.get("response", {})
+        method = req.get("method", "").upper()
+        raw_url = req.get("url", "")
+        status = resp.get("status", 0)
+        path = urlparse(raw_url).path
+
+        # Collect WWW-Authenticate hints from 401/403 responses
+        if status in (401, 403):
+            for hdr in resp.get("headers", []):
+                if hdr.get("name", "").lower() == "www-authenticate":
+                    val = hdr.get("value", "").strip()
+                    if val:
+                        auth_hints_set.add(val)
+
+        # Match to best-fitting spec endpoint
+        for spec_method, spec_path, pattern in spec_patterns:
+            if spec_method == method and pattern.search(path):
+                key = (spec_method, spec_path)
+                stats[key]["request_count"] += 1
+                if 200 <= status < 300:
+                    stats[key]["ok_count"] += 1
+                s_key = str(status)
+                stats[key]["status_breakdown"][s_key] = (
+                    stats[key]["status_breakdown"].get(s_key, 0) + 1
+                )
+                break
+
+    # 4. Coverage: endpoints that received at least one 2xx response
+    endpoints_with_2xx = sum(1 for v in stats.values() if v["ok_count"] > 0)
+    total = len(spec_endpoints)
+    covered_pct = round(endpoints_with_2xx / total * 100, 1) if total > 0 else 0.0
+
+    # 5. Unreachable endpoints flagged by mapi ([C] in scan output)
+    unreachable = [
+        line.strip()
+        for line in args.scan_output.splitlines()
+        if "[C]" in line
+    ]
+
+    # 6. Filtered scan output summary
+    _summary_kw = {"[c]", "error", "duration", "coverage", "auth", "fail", "time limit"}
+    summary_lines = [
+        line for line in args.scan_output.splitlines()
+        if any(kw in line.lower() for kw in _summary_kw)
+    ]
+
+    endpoint_stats = [
+        {
+            "method": m,
+            "path": p,
+            "request_count": stats[(m, p)]["request_count"],
+            "ok_count": stats[(m, p)]["ok_count"],
+            "status_breakdown": stats[(m, p)]["status_breakdown"],
+        }
+        for m, p in spec_endpoints
+    ]
+
+    return json.dumps({
+        "describe_command": describe_cmd_str,
+        "total_endpoints": total,
+        "covered_pct": covered_pct,
+        "total_requests": total_requests,
+        "auth_hints": sorted(auth_hints_set),
+        "unreachable_endpoints": unreachable,
+        "endpoint_stats": endpoint_stats,
+        "scan_output_summary": "\n".join(summary_lines[:20]),
+    }, indent=2)
+
+
+# -----------------------------
+# Pydantic schema for emit_scan_script
+# -----------------------------
+class EmitScanScriptArgs(BaseModel):
+    api_target: str = Field(..., description="project/target name (e.g., 'myproject/api')")
+    duration: str = Field(..., description="scan duration (e.g., '30s', '2m', '10m')")
+    specification: str = Field(..., description="path to the OpenAPI/Swagger/Postman spec file")
+    url: str = Field(..., description="base URL for the API (e.g., 'https://localhost:8000')")
+    output_path: Optional[str] = Field(None, description="optional filesystem path to write the script; if omitted the script is returned as output only")
+    extra_flags: List[str] = Field(default_factory=list, description="additional mapi run flags in argv order (e.g., ['--header-auth', 'Authorization: Bearer ${TARGET_API_TOKEN}']) - auth tokens here are credentials for the TARGET API, never MAYHEM_TOKEN")
+    har_output_path: str = Field("scan.har", description="path for the --har output file embedded in the script (default: scan.har)")
+
+
+# -----------------------------
+# MCP tool: emit_scan_script
+# -----------------------------
+@mcp.tool(
+    description="""
+    Generate a parameterized bash script wrapping the final tuned mapi run invocation.
+    The script uses set -euo pipefail and validates required environment variables at startup.
+    Pass auth credentials as ${ENV_VAR} references in extra_flags - never inline secrets.
+    Always returns the script content. If output_path is provided, also writes it to disk.
+    """
+)
+def emit_scan_script(args: EmitScanScriptArgs) -> str:
+    # Detect ${VAR_NAME} references in extra_flags for env-var guards
+    _var_re = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
+    seen_vars: set[str] = set()
+    extra_vars: list[str] = []
+    for flag in args.extra_flags:
+        for var in _var_re.findall(flag):
+            if var != "MAYHEM_TOKEN" and var not in seen_vars:
+                seen_vars.add(var)
+                extra_vars.append(var)
+
+    env_guards = [': "${MAYHEM_TOKEN:?MAYHEM_TOKEN must be set}"']
+    for var in extra_vars:
+        env_guards.append(f': "${{{var}:?{var} must be set}}"')
+
+    # Build mapi run invocation with backslash continuation
+    all_flags = args.extra_flags
+    positional_and_opts = [
+        f"  {shlex.quote(args.api_target)} \\",
+        f"  {shlex.quote(args.duration)} \\",
+        f"  {shlex.quote(args.specification)} \\",
+        f"  --url {shlex.quote(args.url)} \\",
+        # f"  --har {args.har_output_path}",
+    ]
+    if all_flags:
+        for i, flag in enumerate(all_flags):
+            suffix = " \\"
+            positional_and_opts.append(f"  {flag}{suffix}")
+
+    script = "\n".join([
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        *env_guards,
+        "",
+        "mapi run \\",
+        *positional_and_opts,
+        "   \"${@}\"", # allow additional flags to be passed when invoking the script
+    ])
+
+    if args.output_path:
+        try:
+            out_path = _assert_under_cwd(Path(args.output_path))
+        except PermissionError as e:
+            raise RuntimeError(str(e)) from None
+        out_path.write_text(script)
+        os.chmod(out_path, 0o700)
+        return f"Script written to {out_path}\n\n{script}"
+    return script
+
+
+# -----------------------------
+# Heuristic rule helpers for suggest_tune_changes
+# -----------------------------
+def _rule_auth(quality: dict, current: dict) -> dict | None:
+    """Rule 1: auth failure signal → suggest auth flags."""
+    auth_hints = quality.get("auth_hints", [])
+    summary = quality.get("scan_output_summary", "").lower()
+    auth_signal = bool(auth_hints) or any(
+        kw in summary for kw in ("auth", "401", "403", "unauthorized", "forbidden")
+    )
+    if not auth_signal:
+        return None
+    if current.get("header_auth") or current.get("basic_auth") or current.get("cookie_auth"):
+        return None  # auth flag already set
+    hint_text = " ".join(auth_hints).lower()
+    if "basic" in hint_text:
+        flag, value = "--basic-auth", "${TARGET_API_USER}:${TARGET_API_PASS}"
+    else:
+        flag, value = "--header-auth", "Authorization: Bearer ${TARGET_API_TOKEN}"
+    return {
+        "flag": flag,
+        "value": value,
+        "reason": (
+            "Auth failure detected - 401/403 responses indicate the API under test "
+            "requires authentication. Replace the placeholder env var with a credential "
+            "for the TARGET API itself (not MAYHEM_TOKEN, which is unrelated)."
+        ),
+        "warning": None,
+    }
+
+
+def _rule_min_requests(quality: dict, current: dict, min_covered_pct: int) -> dict | None:
+    """Rule 2: low coverage + not duration-limited → raise --min-request-count."""
+    covered_pct = quality.get("covered_pct", 0)
+    summary = quality.get("scan_output_summary", "").lower()
+    if covered_pct >= min_covered_pct:
+        return None
+    if "duration" in summary or "time limit" in summary:
+        return None  # duration-limited case handled by Rule 3
+    total_endpoints = max(quality.get("total_endpoints", 1), 1)
+    suggested = max(50, total_endpoints * 20)
+    current_min = current.get("min_request_count")
+    if current_min and int(current_min) >= suggested:
+        return None
+    return {
+        "flag": "--min-request-count",
+        "value": str(suggested),
+        "reason": f"Low endpoint coverage ({covered_pct}%) with time remaining - increase per-endpoint request budget",
+        "warning": None,
+    }
+
+
+def _rule_duration(quality: dict, current: dict, min_covered_pct: int) -> dict | None:
+    """Rule 3: low coverage + duration-limited → increase duration."""
+    covered_pct = quality.get("covered_pct", 0)
+    summary = quality.get("scan_output_summary", "").lower()
+    if covered_pct >= min_covered_pct:
+        return None
+    if "duration" not in summary and "time limit" not in summary:
+        return None
+    current_duration = current.get("duration", "30s")
+    if current_duration == "auto":
+        return None
+    try:
+        secs = parse_duration(current_duration)
+    except ValueError:
+        return None
+    doubled = secs * 2
+    if doubled >= 3600:
+        next_dur = f"{int(doubled / 3600)}h"
+    elif doubled >= 60:
+        next_dur = f"{int(doubled / 60)}m"
+    else:
+        next_dur = f"{int(doubled)}s"
+    if current_duration == next_dur:
+        return None
+    return {
+        "flag": "duration",
+        "value": next_dur,
+        "reason": f"Low endpoint coverage ({covered_pct}%) and scan hit time limit - increase duration from {current_duration} to {next_dur}",
+        "warning": None,
+    }
+
+
+def _rule_ignore_endpoint(quality: dict, current: dict, iteration: int) -> dict | None:
+    """Rule 4: chronically 5xx endpoint → --ignore-endpoint with narrowing warning."""
+    if iteration < 2:
+        return None
+    existing_ignores = current.get("ignore_endpoint", [])
+    for ep in quality.get("endpoint_stats", []):
+        count = ep.get("request_count", 0)
+        ok = ep.get("ok_count", 0)
+        if count < 10 or ok > 0:
+            continue
+        breakdown = ep.get("status_breakdown", {})
+        five_xx = sum(v for k, v in breakdown.items() if k.startswith("5"))
+        if count > 0 and five_xx / count > 0.8:
+            target = f"{ep['method']}:{ep['path']}"
+            if target in existing_ignores:
+                continue
+            return {
+                "flag": "--ignore-endpoint",
+                "value": target,
+                "reason": f"{ep['method']} {ep['path']} returned 5xx on {five_xx}/{count} attempts with 0 successes",
+                "warning": "[FUZZING NARROWING WARNING] Ignoring this endpoint reduces the fuzzer's attack surface. Confirm this endpoint is intentionally excluded before applying.",
+            }
+    return None
+
+
+def _rule_validation_errors(quality: dict, min_covered_pct: int) -> dict | None:
+    """Rule 5: high 400/422 rate → informational note about resource hints."""
+    total = quality.get("total_requests", 0)
+    covered_pct = quality.get("covered_pct", 0)
+    if total == 0 or covered_pct < min_covered_pct / 2:
+        return None
+    val_errors = sum(
+        ep.get("status_breakdown", {}).get("400", 0) + ep.get("status_breakdown", {}).get("422", 0)
+        for ep in quality.get("endpoint_stats", [])
+    )
+    if val_errors / total <= 0.4:
+        return None
+    return {
+        "flag": None,
+        "value": None,
+        "reason": (
+            f"High validation-error rate ({val_errors}/{total} requests returned 400/422). "
+            "Resource hints can seed valid parameter values - support coming in Capability 2."
+        ),
+        "warning": None,
+    }
+
+
+# -----------------------------
+# Pydantic schema for suggest_tune_changes
+# -----------------------------
+class SuggestTuneChangesArgs(BaseModel):
+    quality_json: str = Field(..., description="JSON string returned by evaluate_scan_quality")
+    current_args_json: str = Field(..., description="JSON object of the current mapi run arguments (keys match RunArgs fields, e.g. {\"duration\": \"30s\", \"header_auth\": []})")
+    iteration: int = Field(1, ge=1, description="current tune-loop iteration number (1-indexed)")
+    min_covered_pct: int = Field(25, ge=1, le=100, description="minimum % of spec endpoints with ≥1 2xx response to consider the scan good (default: 25)")
+
+
+# -----------------------------
+# MCP tool: suggest_tune_changes
+# -----------------------------
+@mcp.tool(
+    description="""
+    Analyze mapi scan quality metrics and suggest flag changes to improve coverage.
+    Applies 6 deterministic heuristic rules in priority order.
+    Returns a JSON object with a suggestions list, exhausted flag, and rationale.
+    Rule 4 (--ignore-endpoint suggestions) always carries a [FUZZING NARROWING WARNING] -
+    present this warning to the user and require explicit approval before applying.
+    When exhausted=true, quality thresholds are met or heuristics are exhausted.
+    """
+)
+def suggest_tune_changes(args: SuggestTuneChangesArgs) -> str:
+    try:
+        quality = json.loads(args.quality_json)
+        current = json.loads(args.current_args_json)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid JSON input: {e}") from None
+
+    covered_pct = quality.get("covered_pct", 0)
+
+    # Rule 6: convergence check - fast exit if threshold met
+    if covered_pct >= args.min_covered_pct:
+        return json.dumps({
+            "suggestions": [],
+            "exhausted": True,
+            "rationale": f"Quality threshold met - coverage {covered_pct}% ≥ {args.min_covered_pct}%. Ready to emit scan script.",
+        }, indent=2)
+
+    # Rules 1–5
+    suggestions = [
+        s for s in [
+            _rule_auth(quality, current),
+            _rule_min_requests(quality, current, args.min_covered_pct),
+            _rule_duration(quality, current, args.min_covered_pct),
+            _rule_ignore_endpoint(quality, current, args.iteration),
+            _rule_validation_errors(quality, args.min_covered_pct),
+        ]
+        if s is not None
+    ]
+
+    # LLM fallback: no new actionable suggestions after 3+ iterations
+    actionable = [s for s in suggestions if s.get("flag") is not None]
+    if args.iteration >= 3 and not actionable:
+        return json.dumps({
+            "suggestions": suggestions,
+            "exhausted": True,
+            "rationale": (
+                f"Heuristic suggestions exhausted after {args.iteration} iterations. "
+                "LLM should evaluate the quality data and propose alternative strategies, "
+                "or accept the current configuration."
+            ),
+        }, indent=2)
+
+    rationale = (
+        f"{len(suggestions)} suggestion(s) generated. "
+        f"Coverage: {covered_pct}% (threshold: {args.min_covered_pct}%)."
+        if suggestions
+        else f"No applicable heuristics triggered. Coverage: {covered_pct}% (threshold: {args.min_covered_pct}%)."
+    )
+    return json.dumps({
+        "suggestions": suggestions,
+        "exhausted": False,
+        "rationale": rationale,
+    }, indent=2)
+
+
+# -----------------------------
+# Helpers for suggest_source_aware_changes
+# -----------------------------
+_ID_PARAM_RE = re.compile(r'(_id|Id|_ID|ID|_uuid|uuid|Uuid|username|slug|handle)$')
+_ENUM_PARAM_RE = re.compile(r'(_type|_status|_state|_kind)$')
+_CRED_PARAM_RE = re.compile(r'(token|_key|_secret|api_key|password)$')
+
+_PATTERN_RULE_MAP: dict[str, tuple[str, str, str]] = {
+    "sql": (
+        "--include-rule", "sql-injection",
+        "Source contains SQL query patterns - sql-injection rule is highly relevant",
+    ),
+    "subprocess": (
+        "--include-rule", "command-injection",
+        "Source contains subprocess/os.system patterns - command-injection rule is highly relevant",
+    ),
+    "file_ops": (
+        "--include-rule", "path-traversal",
+        "Source contains file path operations - path-traversal rule is highly relevant",
+    ),
+}
+_EXPERIMENTAL_PATTERNS = {"pii", "nosql"}
+
+
+def _parse_spec_params(spec_output: str) -> list[tuple[str, str, str, str]]:
+    """Return (method, path, param_type, resource_path) for every parameter line."""
+    params = []
+    for line in spec_output.strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            params.append((parts[0].upper(), parts[1], parts[2].upper(), parts[3]))
+    return params
+
+
+def _rule_path_id_params(
+    params: list[tuple[str, str, str, str]],
+    source_context: dict,
+    current_hints: list[str],
+) -> list[dict]:
+    suggestions = []
+    seen: set[str] = set()
+    for _, path, param_type, resource_path in params:
+        if param_type != "PATH":
+            continue
+        param_name = resource_path.split("/")[-1]
+        if param_name in seen or not _ID_PARAM_RE.search(param_name):
+            continue
+        if any(param_name in h for h in current_hints):
+            continue
+        values = source_context.get(param_name, [])
+        if not values:
+            continue
+        seen.add(param_name)
+        for v in values:
+            suggestions.append({
+                "flag": "--resource-hint",
+                "value": f"{param_name}$:{v}",
+                "reason": (
+                    f"PATH parameter '{param_name}' on {path} requires a real entity value - "
+                    f"mapi cannot random-walk into valid IDs; seeded with {v!r} from source context"
+                ),
+                "warning": None,
+            })
+    return suggestions
+
+
+def _rule_enum_params(
+    params: list[tuple[str, str, str, str]],
+    source_context: dict,
+    current_hints: list[str],
+) -> list[dict]:
+    suggestions = []
+    seen: set[str] = set()
+    for _, path, param_type, resource_path in params:
+        if param_type not in ("BODY", "QUERY"):
+            continue
+        param_name = resource_path.split("/")[-1]
+        if param_name in seen or not _ENUM_PARAM_RE.search(param_name):
+            continue
+        if any(param_name in h for h in current_hints):
+            continue
+        values = source_context.get(param_name, [])
+        if not values:
+            continue
+        seen.add(param_name)
+        for v in values:
+            suggestions.append({
+                "flag": "--resource-hint",
+                "value": f"{param_name}$:{v}",
+                "reason": (
+                    f"BODY/QUERY parameter '{param_name}' on {path} looks like an enum - "
+                    f"seeded with {v!r} from source context"
+                ),
+                "warning": None,
+            })
+    return suggestions
+
+
+def _rule_skip_credentials(params: list[tuple[str, str, str, str]]) -> list[dict]:
+    suggestions = []
+    seen: set[str] = set()
+    for _, _, _, resource_path in params:
+        param_name = resource_path.split("/")[-1]
+        if param_name in seen or not _CRED_PARAM_RE.search(param_name):
+            continue
+        seen.add(param_name)
+        suggestions.append({
+            "flag": None,
+            "value": None,
+            "reason": (
+                f"Parameter '{param_name}' looks like a credential - "
+                "resource hints for credentials are not suggested automatically. "
+                "Use --header-auth or --basic-auth instead."
+            ),
+            "warning": None,
+        })
+    return suggestions
+
+
+def _rule_source_patterns(source_context: dict, current: dict) -> list[dict]:
+    patterns = source_context.get("__source_patterns__", [])
+    if not patterns:
+        return []
+    suggestions = []
+    experimental_needed = False
+    for pattern in patterns:
+        if pattern in _PATTERN_RULE_MAP:
+            flag, value, reason = _PATTERN_RULE_MAP[pattern]
+            if value not in current.get("include_rule", []):
+                suggestions.append({"flag": flag, "value": value, "reason": reason, "warning": None})
+        elif pattern in _EXPERIMENTAL_PATTERNS and not current.get("experimental_rules"):
+            experimental_needed = True
+    if experimental_needed:
+        found = [p for p in patterns if p in _EXPERIMENTAL_PATTERNS]
+        suggestions.append({
+            "flag": "--experimental-rules",
+            "value": None,
+            "reason": f"Source patterns {found} suggest enabling experimental rules (pii-disclosure, nosql-injection)",
+            "warning": None,
+        })
+    return suggestions
+
+
+def _rule_ignore_rule_requests(source_context: dict, current: dict) -> list[dict]:
+    ignore_rules = source_context.get("__ignore_rules__", [])
+    if not ignore_rules:
+        return []
+    suggestions = []
+    existing = current.get("ignore_rule", [])
+    for rule_name in ignore_rules:
+        if rule_name in existing:
+            continue
+        suggestions.append({
+            "flag": "--ignore-rule",
+            "value": rule_name,
+            "reason": f"Requested suppression of rule '{rule_name}'",
+            "warning": (
+                f"[FUZZING NARROWING WARNING] Ignoring rule '{rule_name}' suppresses all detections "
+                "of that defect class. Confirm this is intentional before applying."
+            ),
+        })
+    return suggestions
+
+
+# -----------------------------
+# Pydantic schema for suggest_source_aware_changes
+# -----------------------------
+class SuggestSourceAwareChangesArgs(BaseModel):
+    spec_output: str = Field(..., description="raw text output from mapi_describe_specification")
+    source_context_json: str = Field(
+        default="{}",
+        description=(
+            'JSON object mapping parameter names to known valid values, '
+            'e.g. {"username": ["alice"], "status": ["available", "pending"]}. '
+            'May also include special keys: '
+            '"__source_patterns__": ["sql","subprocess","file_ops","pii","nosql"] for rule prioritization, '
+            'and "__ignore_rules__": ["rule-name"] for user-requested suppressions (carries [FUZZING NARROWING WARNING]).'
+        ),
+    )
+    current_args_json: str = Field(
+        default="{}",
+        description="JSON of current mapi run arguments (to skip already-set hints and rules)",
+    )
+
+
+# -----------------------------
+# MCP tool: suggest_source_aware_changes
+# -----------------------------
+@mcp.tool(
+    description="""
+    Suggest source-aware mapi run changes based on spec parameter analysis and source code context.
+    Generates --resource-hint suggestions for PATH parameters that need real entity values,
+    --include-rule suggestions based on source code patterns (sql, subprocess, file ops, pii, nosql),
+    and --ignore-rule suggestions (with [FUZZING NARROWING WARNING]) when explicitly requested.
+    Credential-named parameters are flagged as informational - never auto-suggested as hints.
+    Limits resource hint suggestions to a small set (3-5) to preserve fuzzer input entropy.
+    Call mapi_describe_specification first to get spec_output.
+    Hint values are substituted verbatim into requests - emit a concrete conforming
+    example (e.g. 'FLEET-NA-001'), never a regex or pattern. A regex value is sent
+    as a literal string and will fail any real format validation.
+    """
+)
+def suggest_source_aware_changes(args: SuggestSourceAwareChangesArgs) -> str:
+    try:
+        source_context = json.loads(args.source_context_json)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid source_context_json: {e}") from None
+    try:
+        current = json.loads(args.current_args_json)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid current_args_json: {e}") from None
+
+    params = _parse_spec_params(args.spec_output)
+    current_hints = current.get("resource_hint", [])
+
+    hint_suggestions: list[dict] = []
+    hint_suggestions.extend(_rule_path_id_params(params, source_context, current_hints))
+    hint_suggestions.extend(_rule_enum_params(params, source_context, current_hints))
+    # Cap resource hints at 5 to preserve fuzzer entropy
+    hint_suggestions = hint_suggestions[:5]
+
+    other_suggestions: list[dict] = []
+    other_suggestions.extend(_rule_skip_credentials(params))
+    other_suggestions.extend(_rule_source_patterns(source_context, current))
+    other_suggestions.extend(_rule_ignore_rule_requests(source_context, current))
+
+    suggestions = hint_suggestions + other_suggestions
+    actionable = sum(1 for s in suggestions if s["flag"] is not None)
+    rationale = (
+        f"{actionable} actionable suggestion(s) from {len(params)} spec parameters."
+        if actionable
+        else f"No source-aware suggestions: provide values in source_context_json for PATH/enum parameters, or add __source_patterns__ for rule prioritization."
+    )
+    return json.dumps({"suggestions": suggestions, "exhausted": False, "rationale": rationale}, indent=2)
+
+
+# -----------------------------
+# Pydantic schema for emit_mapi_config
+# -----------------------------
+class EmitMapiConfigArgs(BaseModel):
+    resource_hint_groups: List[List[str]] = Field(
+        default_factory=list,
+        description=(
+            "list of hint groups for correlated parameter seeding; "
+            "each group is a list of 'resource_path_regex:value' strings selected together. "
+            "Use multiple groups when parameters must be consistent (e.g. username and userStatus). "
+            "Single-item groups are equivalent to CLI --resource-hint flags."
+        ),
+    )
+    suppressed_rules: List[str] = Field(
+        default_factory=list,
+        description=(
+            "list of mapi rule names to suppress in the config "
+            "(e.g. 'internal-server-error'). Each requires prior [FUZZING NARROWING WARNING] acknowledgment."
+        ),
+    )
+    output_path: Optional[str] = Field(
+        None,
+        description="optional filesystem path to write the .mapi YAML config; if omitted the config is returned as output only",
+    )
+
+
+# -----------------------------
+# MCP tool: emit_mapi_config
+# -----------------------------
+@mcp.tool(
+    description="""
+    Generate a .mapi YAML configuration file with resource hint groups and issue suppressions.
+    Use this when correlated parameter grouping is needed (multiple parameters must be seeded
+    together) or when the config should be committed to source control for team sharing.
+    For a one-off scan, the bash script from emit_scan_script is sufficient.
+    Always returns the YAML content; also writes to output_path if provided.
+    """
+)
+def emit_mapi_config(args: EmitMapiConfigArgs) -> str:
+    lines = ['version: "1.0"', ""]
+
+    if args.resource_hint_groups:
+        lines.append("resource_hints:")
+        for i, group in enumerate(args.resource_hint_groups):
+            lines.append(f'- name: "group-{i + 1}"')
+            lines.append("  hints:")
+            for hint in group:
+                lines.append(f'  - "{hint}"')
+        lines.append("")
+
+    if args.suppressed_rules:
+        lines.append("suppressed:")
+        for rule in args.suppressed_rules:
+            lines.append(f'- reason: "Suppressed by mapi onboarding - review before committing"')
+            lines.append(f'  rule_id: "{rule}"')
+        lines.append("")
+
+    config = "\n".join(lines)
+
+    if args.output_path:
+        try:
+            out_path = _assert_under_cwd(Path(args.output_path))
+        except PermissionError as e:
+            raise RuntimeError(str(e)) from None
+        out_path.write_text(config)
+        return f"Config written to {out_path}\n\n{config}"
+    return config
+
+
+# -----------------------------
+# Pydantic schema for emit_exploit_report
+# -----------------------------
+_REPORT_HEADER = """> **SECURITY NOTICE:** This report contains exploit suggestions generated by automated analysis.
+> These are suggestions only - review carefully before executing any request.
+> Requests tagged [DESTRUCTIVE] would mutate or delete server state.
+> Obtain appropriate authorization before testing any exploit in a production system.
+"""
+
+
+class EmitExploitReportArgs(BaseModel):
+    run_id: str = Field(..., description="Mayhem run ID these findings are from")
+    findings: List[dict] = Field(
+        ...,
+        description=(
+            "List of per-defect finding objects. Each must have: "
+            "defect_id (str), rule (str), endpoint (str 'METHOD /path'), "
+            "reproduced (bool), exploit_request (str - full HTTP request text; "
+            "use <PLACEHOLDER> for any secrets, NEVER real credential values), "
+            "destructive (bool - True if the request would mutate/delete server state), "
+            "impact (str - one-sentence description), "
+            "source_refs (list[str] - optional file:line refs), "
+            "notes (str - optional freeform context)."
+        ),
+    )
+    output_path: Optional[str] = Field(
+        None,
+        description="optional filesystem path to write the report; if omitted the report is returned as output only",
+    )
+
+
+# -----------------------------
+# MCP tool: emit_exploit_report
+# -----------------------------
+@mcp.tool(
+    description="""
+    Generate a markdown exploit-suggestion report for defects from a mapi run.
+    Each finding section includes the defect class, endpoint, replay status, a suggested
+    HTTP request the user can run to verify impact, and a [DESTRUCTIVE] tag if the request
+    would mutate or delete server state.
+    The report opens with a hardcoded security warning header.
+    exploit_request fields MUST use <PLACEHOLDER> values for any credentials or secrets
+    observed in defect data - never include real token or password values.
+    This tool writes a file and returns text. It does NOT send any HTTP requests.
+    """
+)
+def emit_exploit_report(args: EmitExploitReportArgs) -> str:
+    sections = [_REPORT_HEADER, f"# Exploit Report - Run `{args.run_id}`\n"]
+
+    reproduced = [f for f in args.findings if f.get("reproduced")]
+    skipped = [f for f in args.findings if not f.get("reproduced")]
+
+    sections.append(
+        f"**{len(reproduced)} defect(s) reproduced** | "
+        f"{len(skipped)} no longer reproduce (skipped)\n"
+    )
+
+    for f in reproduced:
+        defect_id = f.get("defect_id", "?")
+        rule = f.get("rule", "unknown")
+        endpoint = f.get("endpoint", "?")
+        impact = f.get("impact", "")
+        exploit_request = f.get("exploit_request", "")
+        destructive = f.get("destructive", False)
+        source_refs = f.get("source_refs", [])
+        notes = f.get("notes", "")
+
+        section = [f"\n## Defect {defect_id}: `{rule}` on `{endpoint}`\n"]
+        section.append(f"**Status:** Reproduced  ")
+        if impact:
+            section.append(f"**Impact:** {impact}\n")
+        section.append("\n### Exploit Request\n")
+        if destructive:
+            section.append("**[DESTRUCTIVE]** - this request would mutate or delete server state.\n")
+        section.append(f"```http\n{exploit_request}\n```\n")
+        section.append(
+            "> Any `<PLACEHOLDER>` values must be replaced with real credentials before running.\n"
+            "> Do not run this request without authorization.\n"
+        )
+        if source_refs:
+            section.append("\n### Source References\n")
+            for ref in source_refs:
+                section.append(f"- `{ref}`\n")
+        if notes:
+            section.append(f"\n**Notes:** {notes}\n")
+        section.append("\n---\n")
+        sections.extend(section)
+
+    for f in skipped:
+        defect_id = f.get("defect_id", "?")
+        rule = f.get("rule", "unknown")
+        endpoint = f.get("endpoint", "?")
+        sections.append(
+            f"\n## Defect {defect_id}: `{rule}` on `{endpoint}`\n"
+            f"**Status:** Not reproduced - skipped.\n\n---\n"
         )
 
+    report = "".join(sections)
+
+    if args.output_path:
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-            exit_code = proc.returncode or 0
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return "Error: Command timed out after 1 minute"
-
-        output = f"Command executed with exit code: {exit_code}\n\n"
-        if stdout:
-            output += f"STDOUT:\n{stdout.decode()}\n"
-        if stderr:
-            output += f"STDERR:\n{stderr.decode()}\n"
-
-        return output
-
-    except Exception as e:
-        return f"Error executing command: {str(e)}"
+            out_path = _assert_under_cwd(Path(args.output_path))
+        except PermissionError as e:
+            raise RuntimeError(str(e)) from None
+        out_path.write_text(report)
+        return f"Report written to {out_path}\n\n{report}"
+    return report
 
 
-@mcp.tool(description="Read contents of a file on the MAPI server host, optionally specifying line range.")
+# -----------------------------
+# MCP prompt: onboard-mapi-scan
+# -----------------------------
+@mcp.prompt(
+    name="onboard-mapi-scan",
+    description="Orchestrate the mapi onboarding and tune loop: walk through setup, run a scan, evaluate quality, suggest tuning changes, and emit a final leave-behind scan script.",
+)
+async def onboard_mapi_scan(
+    workspace: str,
+    project: str,
+    specification: str,
+    url: str,
+    target_name: str = "",
+    duration: str = "30s",
+    max_iterations: int = 3,
+    min_covered_pct: int = 25,
+) -> str:
+    api_target = f"{workspace}/{project}/{target_name}" if target_name else f"{workspace}/{project}"
+    har_path = f"/tmp/mapi-onboard-{workspace}-{project}.har"
+    return _render(
+        _load_prompt_template("onboard_mapi_scan.md"),
+        workspace=workspace,
+        project=project,
+        target_name=target_name if target_name else "(none)",
+        api_target=api_target,
+        specification=specification,
+        url=url,
+        duration=duration,
+        max_iterations=str(max_iterations),
+        min_covered_pct=str(min_covered_pct),
+        har_path=har_path,
+    )
+
+
+# -----------------------------
+# MCP prompt: generate-exploit
+# -----------------------------
+@mcp.prompt(
+    name="generate-exploit",
+    description="Generate exploit suggestions for defects found by a mapi run. For each defect, confirms reproduction, crafts a targeted HTTP request the user can run to demonstrate impact, and emits a leave-behind markdown report.",
+)
+async def generate_exploit(
+    run_id: str,
+    url: str,
+    specification: str = "",
+    source_dir: str = "",
+    output_path: str = "exploit-report.md",
+) -> str:
+    return _render(
+        _load_prompt_template("generate_exploit.md"),
+        run_id=run_id,
+        url=url,
+        specification=specification if specification else "(none)",
+        source_dir=source_dir if source_dir else "(none)",
+        output_path=output_path,
+    )
+
+
+@mcp.tool(
+    description=(
+        "Read a file from the server's working directory. "
+        "NOTE: when mcp-server-mapi runs inside a Docker container this tool reads from the "
+        "container filesystem — it cannot access the user's local machine. "
+        "For local source files, prefer the LLM's built-in file reading capability. "
+        "This tool is most useful when the server runs locally via `uv run`."
+    )
+)
 def read_file(
     file_path: str, line_start: int | None = None, line_end: int | None = None
 ) -> str:
@@ -525,7 +1633,10 @@ def read_file(
         line_end: Ending line number (1-based, optional)
     """
     try:
-        path = Path(file_path)
+        try:
+            path = _assert_under_cwd(Path(file_path))
+        except PermissionError as e:
+            return f"Error: {e}"
         if not path.exists():
             return f"Error: File not found at {file_path}"
 
@@ -575,7 +1686,10 @@ def edit_file(
         replace_all: If True, replace all occurrences; if False, replace only first occurrence
     """
     try:
-        path = Path(file_path)
+        try:
+            path = _assert_under_cwd(Path(file_path))
+        except PermissionError as e:
+            return f"Error: {e}"
         if not path.exists():
             return f"Error: File not found at {file_path}"
 

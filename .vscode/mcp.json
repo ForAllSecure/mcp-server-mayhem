@@ -6,6 +6,10 @@
         "run",
         "-i",
         "--rm",
+        "--network",
+        "host",
+        "-e",
+        "MAYHEM_URL",
         "-e",
         "MAYHEM_TOKEN",
         "ghcr.io/forallsecure/mcp-server-mapi:latest",
@@ -15,7 +19,8 @@
         "mcp"
       ],
       "env": {
-        "MAYHEM_TOKEN": "${input:mayhem_token}"
+        "MAYHEM_TOKEN": "${input:mayhem_token}",
+        "MAYHEM_URL": "${input:mayhem_url}"
       },
       "type": "stdio"
     }
@@ -25,6 +30,11 @@
       "id": "mayhem_token",
       "type": "promptString",
       "description": "MAYHEM_TOKEN (Mayhem API key)"
+    },
+    {
+      "id": "mayhem_url",
+      "type": "promptString",
+      "description": "MAYHEM_URL (Mayhem API URL)"
     }
   ]
 }

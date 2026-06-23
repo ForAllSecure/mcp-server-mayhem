@@ -2,7 +2,7 @@
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for
 the [Mayhem for API](https://docs.mayhem.security/api-testing/summary/) CLI
-(`mapi`)
+(`mapi`).
 
 > [!NOTE]
 > The code in this repository is provided as-is and is intended only for
@@ -11,7 +11,12 @@ the [Mayhem for API](https://docs.mayhem.security/api-testing/summary/) CLI
 
 ## Capabilities
 
-The MCP server for `mapi` supports the following capabilities:
+> [!NOTE]
+> Not all MCP clients surface prompts as slash commands. VS Code Copilot shows
+> `/onboard-mapi-scan` and `/generate-exploit` in the prompt picker. Claude
+> Desktop, Claude Code, and most other clients require asking the model to run
+> the prompt by name (e.g., "Run the onboard-mapi-scan prompt") or using the
+> individual tools directly.
 
 ### `mapi discover`
 
@@ -21,10 +26,152 @@ Discover APIs running on a single host, multiple hosts, CIDR blocks, or domains.
 
 Run a scan to check an API for defects.
 
+### Capability 1 - Agentic Onboarding & Tune Loop
+
+The `/onboard-mapi-scan` prompt runs an end-to-end fuzzing workflow. It verifies
+your environment, runs an initial scan, evaluates endpoint coverage, suggests
+configuration improvements, and emits a bash script you can commit to CI. The
+loop iterates until coverage meets a target threshold or the iteration limit is
+reached.
+
+**Tools used:**
+
+- `evaluate_scan_quality` - parses the HAR output and spec to compute endpoint
+  coverage (`covered_pct`), surface auth hints, and identify unreachable endpoints
+- `suggest_tune_changes` - applies heuristic rules (auth headers, request count,
+  duration, endpoint exclusions, validation errors) to propose the next tuning step
+- `emit_scan_script` - writes a `set -euo pipefail` bash script with all finalized
+  flags and env-var guards for the leave-behind artifact
+
+**Invoking the prompt:**
+
+In your MCP client, invoke `/onboard-mapi-scan` with the following arguments:
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `workspace` | yes | — | Mayhem workspace name (e.g. `myorg`) |
+| `project` | yes | — | Mayhem project name (e.g. `my-api`) |
+| `target_name` | no | `""` | Specific target within the project; omit to use the project default |
+| `specification` | yes | - | Path to an OpenAPI/Swagger/Postman spec file |
+| `url` | yes | - | Base URL of the API under test |
+| `duration` | no | `30s` | Initial scan duration |
+| `max_iterations` | no | `3` | Maximum tune-loop iterations |
+| `min_covered_pct` | no | `25` | Coverage threshold that stops the loop early |
+
+The `--har` flag is handled automatically. mapi writes HAR output to `/tmp`;
+`evaluate_scan_quality` reads it from there.
+
+> [!NOTE]
+> Any suggestion to add `--ignore-endpoint` (which narrows the fuzzer's attack
+> surface) will be surfaced with a `[FUZZING NARROWING WARNING]` and requires
+> explicit confirmation before it is applied.
+
+### Capability 2 - Source-Aware Fuzzing
+
+After the first quality evaluation, the `/onboard-mapi-scan` prompt optionally
+analyzes the API spec and source code to propose targeted configuration improvements:
+resource hints for low-coverage PATH parameters, rule prioritization based on
+observed code patterns, and endpoint or tag filters where appropriate.
+
+**Tools used:**
+
+- `mapi_describe_specification` - fetches the full parameter table from a spec
+  (used internally by the prompt to identify which parameters need seeding)
+- `suggest_source_aware_changes` - applies heuristic rules to spec parameters and
+  source-extracted values to propose `--resource-hint`, `--include-rule`, and
+  `--experimental-rules` changes
+- `emit_mapi_config` - generates a `.mapi` YAML configuration file with correlated
+  resource hint groups and issue suppressions for team sharing or SCM storage
+
+**How it works:**
+
+Capability 2 runs as an optional **Step 4.5** inside the `/onboard-mapi-scan`
+flow, after the first scan quality evaluation. The prompt identifies PATH parameters
+with zero coverage, asks you to point to relevant source files (fixture data, enum
+definitions, seed files), reads them, and generates a small number of targeted
+hints. It also detects code patterns (SQL queries, subprocess calls, file operations,
+PII fields) and suggests enabling the corresponding mapi rules.
+
+You don't need a separate invocation. It runs inside the standard
+`/onboard-mapi-scan` flow.
+
+**Fuzziness guardrail:**
+
+- `--resource-hint` and `--include-rule` suggestions are applied without extra
+  confirmation - they expand mapi's reach, not narrow it
+- Any suggestion involving `--ignore-endpoint`, `--ignore-endpoints-by-tag`, or
+  `--ignore-rule` carries a `[FUZZING NARROWING WARNING]` and requires explicit
+  confirmation before it is applied
+- Resource hints are capped at 3-5 per session to preserve fuzzer input entropy
+  (mapi applies hints on the majority of generated requests)
+
+**`.mapi` config file:**
+
+At the end of the flow, the prompt optionally offers to generate a `.mapi` YAML
+config file via `emit_mapi_config`. This is most useful when you need correlated
+parameter groups (multiple parameters seeded together consistently) or want to
+commit suppressions to source control for team sharing. For one-off scans, the
+emitted bash script is sufficient.
+
+### Capability 3 - Exploit Generation
+
+> [!WARNING]
+> The server **never sends** exploit requests. All output is text for the user
+> to review and decide whether to run. Obtain appropriate authorization before
+> executing any suggested request.
+
+For each defect found by a mapi run, the `/generate-exploit` prompt confirms
+the defect still reproduces, crafts a targeted HTTP request demonstrating its
+impact, and emits a leave-behind markdown report.
+
+**How to invoke:**
+
+In your MCP client, invoke `/generate-exploit` with:
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `run_id` | yes | - | Mayhem run ID containing the defects (e.g. `myorg/api/42`) |
+| `url` | yes | - | Base URL of the API under test |
+| `specification` | no | `""` | Spec path for endpoint context |
+| `source_dir` | no | `""` | Source root for higher-fidelity exploit crafting |
+| `output_path` | no | `exploit-report.md` | Path for the leave-behind report |
+
+> [!NOTE]
+> The server resolves `output_path` on its own filesystem. When the server runs
+> in a Docker container (the default for all client configurations shown below),
+> that path lives inside the ephemeral container and disappears when it exits.
+> Two options:
+> - The inline chat output from the prompt is the reliable artifact and works
+>   regardless of how you launch the server.
+> - To write a file to the host, add a volume mount to the Docker args
+>   (`-v /path/to/workspace:/work`) and set `output_path` to a path under `/work`.
+>
+> For a local `uv run` launch (see [Local Development](#local-development)),
+> `output_path` writes to the host directly.
+
+**Leave-behind tool:**
+
+`emit_exploit_report` generates a markdown file with one section per defect:
+the reproducing request, the suggested exploit, and source code references if
+available.
+
+**Safety boundary:**
+
+- The server never issues HTTP requests to the API. The exploit suggestion is
+  text only; the user manually copies and runs it.
+- Any suggestion that would mutate or delete server state (account changes, data
+  deletion, DoS) is tagged **`[DESTRUCTIVE]`** and requires explicit user
+  confirmation before it is included in the report.
+- The prompt replaces any credentials or tokens observed in defect data with
+  typed placeholders (`<BEARER_TOKEN>`, `<PASSWORD>`, etc.). Real values never
+  reach the report.
+- Safety warnings appear at four points: prompt start, before each exploit is
+  crafted, at the destructive-action gate, and after the report is generated.
+
 ## Usage
 
-MCP servers are designed to be used with AI applications like Claude, Cursor, or
-ChatGPT. This usage guide explains how to use this project with AI applications.
+MCP servers connect to AI applications like Claude, Cursor, or VS Code Copilot.
+The sections below cover setup for each supported client.
 
 ### Dependencies
 
@@ -35,48 +182,36 @@ ChatGPT. This usage guide explains how to use this project with AI applications.
 If necessary, follow
 [the steps](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic)
 to authenticate to the GitHub Container registry with a personal access token
-(classic). Only the `read:packages` scope is required to use this project.
+(classic). You only need the `read:packages` scope.
 
 > [!NOTE]
 > To check login status, run `docker login ghcr.io`.
 
 ### Use with Visual Studio Code
 
-Visual Studio Code provides
-[native support](https://code.visualstudio.com/docs/copilot/customization/mcp-servers)
-for MCP servers and this project includes a file
-([`.vscode/mcp.json`](.vscode/mcp.json)) that can be used to configure Visual
-Studio Code to use the MCP server for `mapi`.
+Visual Studio Code has
+[native MCP support](https://code.visualstudio.com/docs/copilot/customization/mcp-servers).
+This repository includes a reference [`.vscode/mcp.json`](.vscode/mcp.json).
 
-> [!NOTE]
-> The next paragraph describes how to add the MCP server for `mapi` to a single
-> project or a profile in Visual Studio Code. These steps are also outlined in
-> the
-> [official documentation](https://code.visualstudio.com/docs/copilot/customization/mcp-servers#_other-options-to-add-an-mcp-server)
-> for using MCP servers with Visual Studio Code.
+To add the server to a project, copy `.vscode/mcp.json` to the same location in
+your target project. If your project already has a `.vscode/mcp.json`, merge the
+`mapi` entry into it. To apply it across all projects in a
+[VS Code profile](https://code.visualstudio.com/docs/configure/profiles), place
+the file in the profile directory instead.
 
-To add the MCP server for `mapi` to a single Visual Studio Code project, copy
-the `.vscode/mcp.json` file to the same location in the target project; or, if
-the target project is already configured to use other MCP servers, add the
-details from the `.vscode/mcp.json` file provided in this project to the
-`.vscode/mcp.json` file for the target project. To add the MCP server for `mapi`
-to all Visual Studio Code projects associated with a
-[profile](https://code.visualstudio.com/docs/configure/profiles) add the
-`.vscode/mcp.json` file to the target profile's directory; or, if the target
-profile is already configured to use other MCP servers, add the details from the
-`.vscode/mcp.json` file provided in this project to the `mcp.json` file for the
-target profile.
-
-Once the MCP server for `mapi` has been added to a project or profile, open the
-Chat view and use the tool picker to enable the MCP server for `mapi`. These
-steps are outlined in the
+Once configured, open the Copilot Chat window, start the server, and use the tool
+picker to enable the `mapi` server. See the
 [official documentation](https://code.visualstudio.com/docs/copilot/customization/mcp-servers#_use-mcp-tools-in-chat)
-for using MCP servers with Visual Studio code.
+for details.
+
+VS Code supports prompted input via `${input:promptString}`. The included
+`.vscode/mcp.json` prompts for `MAYHEM_TOKEN` and `MAYHEM_URL` on first use
+and stores them in VS Code's secret storage.
 
 ### Use with Cursor
 
 Add the following to `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json`
-for global access), replacing `your-token-here` with your Mayhem API token:
+for global access):
 
 ```json
 {
@@ -85,26 +220,142 @@ for global access), replacing `your-token-here` with your Mayhem API token:
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
+        "--network", "host",
+        "-e", "MAYHEM_URL",
         "-e", "MAYHEM_TOKEN",
         "ghcr.io/forallsecure/mcp-server-mapi:latest",
         "uv", "run", "mcp-server-mapi", "mcp"
-      ],
-      "env": {
-        "MAYHEM_TOKEN": "your-token-here"
-      }
+      ]
     }
   }
 }
 ```
 
-A reference [`.cursor/mcp.json`](.cursor/mcp.json) file is also included in this
-repository.
+Both come from the host environment via the `-e` flags in the Docker args.
+Cursor does not support prompted input. Export both before launching:
 
-### Use with Claude
+```sh
+export MAYHEM_TOKEN=your-token-here
+export MAYHEM_URL=https://app.mayhem.security
+```
 
-If you're using Claude Desktop you can hook the MCP server to it using the
-[`claude_desktop_config.json`](./claude_desktop_config.json) file - just make
-sure you include your API token in it.
+Add these lines to your shell startup file (`~/.zshrc`, `~/.bashrc`, etc.) to
+avoid setting them manually each session.
+
+This repository also includes a reference [`.cursor/mcp.json`](.cursor/mcp.json).
+
+### Use with Windsurf
+
+Add the following to `.windsurf/mcp.json` in your project (or
+`~/.codeium/windsurf/mcp_config.json` for global access):
+
+```json
+{
+  "mcpServers": {
+    "mapi": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "--network", "host",
+        "-e", "MAYHEM_URL",
+        "-e", "MAYHEM_TOKEN",
+        "ghcr.io/forallsecure/mcp-server-mapi:latest",
+        "uv", "run", "mcp-server-mapi", "mcp"
+      ]
+    }
+  }
+}
+```
+
+Like Cursor, Windsurf picks up `MAYHEM_TOKEN` and `MAYHEM_URL` from the host
+environment. Export both before launching:
+
+```sh
+export MAYHEM_TOKEN=your-token-here
+export MAYHEM_URL=https://app.mayhem.security
+```
+
+This repository also includes a reference [`.windsurf/mcp.json`](.windsurf/mcp.json).
+
+### Use with Claude Code
+
+Add the following to `.mcp.json` at your project root (project-scoped), or
+configure globally with `claude mcp add`:
+
+```json
+{
+  "mcpServers": {
+    "mapi": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "--network", "host",
+        "-e", "MAYHEM_URL",
+        "-e", "MAYHEM_TOKEN",
+        "ghcr.io/forallsecure/mcp-server-mapi:latest",
+        "uv", "run", "mcp-server-mapi", "mcp"
+      ]
+    }
+  }
+}
+```
+
+Like Cursor and Windsurf, both come from the host shell. Export them before
+launching:
+
+```sh
+export MAYHEM_TOKEN=your-token-here
+export MAYHEM_URL=https://app.mayhem.security
+```
+
+> [!NOTE]
+> Claude Code does not surface MCP prompts as slash commands. To run
+> `/onboard-mapi-scan` or `/generate-exploit`, ask the model to invoke the prompt
+> by name, or use the individual tools directly.
+
+A reference `.mcp.json` is not included in this repository.
+
+### Use with Claude Desktop
+
+Add the following to your Claude Desktop config file.
+
+**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "mapi": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "--network", "host",
+        "-e", "MAYHEM_URL",
+        "-e", "MAYHEM_TOKEN",
+        "ghcr.io/forallsecure/mcp-server-mapi:latest",
+        "uv", "run", "mcp-server-mapi", "mcp"
+      ]
+    }
+  }
+}
+```
+
+Both come from the shell you launched Claude Desktop from. On macOS, start it
+from a terminal with both exported:
+
+```sh
+export MAYHEM_TOKEN=your-token-here
+export MAYHEM_URL=https://app.mayhem.security
+open -a "Claude"
+```
+
+This repository includes a reference
+[`claude_desktop_config.json`](./claude_desktop_config.json).
+
+> [!NOTE]
+> Claude Desktop does not surface MCP prompts as slash commands. To run
+> `/onboard-mapi-scan` or `/generate-exploit`, ask the model to invoke the prompt
+> by name, or use the individual tools directly.
 
 ## Local Development
 
