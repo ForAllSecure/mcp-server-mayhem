@@ -347,7 +347,16 @@ class RunArgs(BaseModel):
     cookie_auth: List[str] = Field(default_factory=list)           # --cookie-auth
     header_auth: List[str] = Field(default_factory=list)           # --header-auth
     query_auth: List[str] = Field(default_factory=list)            # --query-auth
-    resource_hint: List[str] = Field(default_factory=list)         # --resource-hint
+    resource_hint: List[str] = Field(
+        default_factory=list,
+        description=(
+            "--resource-hint values seeding named parameters with concrete examples. "
+            "Format: `[METHOD /path PARAM_TYPE] name$:value` — separator is `$:`. "
+            "Examples: \"fleet_id$:FLEET-NA-001\", "
+            "\"GET /telemetry QUERY fleet_id$:FLEET-NA-001\". "
+            "Repeatable; each entry seeds one parameter value."
+        ),
+    )
     include_endpoint: List[str] = Field(default_factory=list)      # --include-endpoint
     ignore_endpoint: List[str] = Field(default_factory=list)       # --ignore-endpoint
     include_endpoints_by_tag: List[str] = Field(default_factory=list)
@@ -1604,7 +1613,15 @@ async def generate_exploit(
     )
 
 
-@mcp.tool(description="Read contents of a file on the MAPI server host, optionally specifying line range.")
+@mcp.tool(
+    description=(
+        "Read a file from the server's working directory. "
+        "NOTE: when mcp-server-mapi runs inside a Docker container this tool reads from the "
+        "container filesystem — it cannot access the user's local machine. "
+        "For local source files, prefer the LLM's built-in file reading capability. "
+        "This tool is most useful when the server runs locally via `uv run`."
+    )
+)
 def read_file(
     file_path: str, line_start: int | None = None, line_end: int | None = None
 ) -> str:

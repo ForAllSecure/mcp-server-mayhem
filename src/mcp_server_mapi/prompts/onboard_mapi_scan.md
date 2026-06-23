@@ -96,7 +96,9 @@ If the user says yes or provides a path:
      [list them]. Can you point me to files with valid values - fixture files,
      enum definitions, test seeds, or database seeders?"
 
-  c. For each file path the user provides, call read_file(<path>) and extract values
+  c. For each file path the user provides, read it using your built-in file reading
+     capability (not the `read_file` MCP tool — that reads from the server's filesystem
+     and cannot see local files when the server runs in Docker). Extract values
      for the identified parameters. Also note any of these source patterns:
      - SQL query strings → add "sql" to source_patterns
      - subprocess/exec/system calls → add "subprocess" to source_patterns
@@ -117,9 +119,14 @@ If the user says yes or provides a path:
        with a known-good value. Apply approved hints to current_args.
        **Do NOT apply more than 3-5 resource hints total** - too many compress
        the fuzzer's input entropy and reduce coverage diversity.
-       **IMPORTANT: hint values must be concrete examples, not patterns or regexes.
-       For example, use 'FLEET-NA-001' not 'FLEET-[A-Z]{2}-[0-9]{3}'.
-       Extract a real value from the source file the user pointed to.**
+       **Resource hint format:** `[METHOD /path PARAM_TYPE] name$:value`
+       The separator is `$:` — never `=` or `:` alone.
+       Examples:
+         - `fleet_id$:FLEET-NA-001` (short form — applies to any param named fleet_id)
+         - `GET /telemetry QUERY fleet_id$:FLEET-NA-001` (scoped to a specific endpoint)
+       Hint values must be concrete examples, not patterns or regexes.
+       For example, use `FLEET-NA-001` not `FLEET-[A-Z]{2}-[0-9]{3}`.
+       Extract a real value from the source file the user pointed to.
      - For each `--include-rule` or `--experimental-rules` suggestion: apply directly
        to current_args (these expand detection, no confirmation needed).
      - For any `--ignore-rule` suggestion: show the [FUZZING NARROWING WARNING] and
@@ -215,6 +222,17 @@ Present a final summary to the user:
 5. If covered_pct < <<min_covered_pct>>% after <<max_iterations>> iterations:
    note that thresholds were not met and suggest the user review the script manually or
    run the loop again with a longer duration or higher max_iterations.
+6. If the script references environment variables like ${TARGET_API_TOKEN},
+   ${TARGET_API_USER}, or ${TARGET_API_PASS}, suggest the user store them in a
+   local `.env` file rather than setting them inline:
+   ```
+   export TARGET_API_TOKEN=your-token-here
+   export TARGET_API_USER=your-username
+   export TARGET_API_PASS=your-password
+   ```
+   Source it before running the script: `source .env && ./mapi-scan.sh`
+   Remind them to add `.env` to `.gitignore` so secrets are never committed:
+   `echo '.env' >> .gitignore`
 
 ---
 
