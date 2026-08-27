@@ -17,9 +17,7 @@ from .common import (
     _add_repeat,
     _assert_under_cwd,
     _CREDENTIAL_FLAGS,
-    _load_prompt_template,
     _redact_cmd,
-    _render,
     _comma_join,
     parse_duration,
 )
@@ -1467,60 +1465,3 @@ def emit_exploit_report(args: EmitExploitReportArgs) -> str:
         return f"Report written to {out_path}\n\n{report}"
     return report
 
-
-# -----------------------------
-# MCP prompt: onboard-mapi-scan
-# -----------------------------
-@mcp.prompt(
-    name="onboard-mapi-scan",
-    description="Orchestrate the mapi onboarding and tune loop: walk through setup, run a scan, evaluate quality, suggest tuning changes, and emit a final leave-behind scan script.",
-)
-async def onboard_mapi_scan(
-    workspace: str,
-    project: str,
-    specification: str,
-    url: str,
-    target_name: str = "",
-    duration: str = "30s",
-    max_iterations: int = 3,
-    min_covered_pct: int = 25,
-) -> str:
-    api_target = f"{workspace}/{project}/{target_name}" if target_name else f"{workspace}/{project}"
-    har_path = f"/tmp/mapi-onboard-{workspace}-{project}.har"
-    return _render(
-        _load_prompt_template("onboard_mapi_scan.md"),
-        workspace=workspace,
-        project=project,
-        target_name=target_name if target_name else "(none)",
-        api_target=api_target,
-        specification=specification,
-        url=url,
-        duration=duration,
-        max_iterations=str(max_iterations),
-        min_covered_pct=str(min_covered_pct),
-        har_path=har_path,
-    )
-
-
-# -----------------------------
-# MCP prompt: generate-exploit
-# -----------------------------
-@mcp.prompt(
-    name="generate-exploit",
-    description="Generate exploit suggestions for defects found by a mapi run. For each defect, confirms reproduction, crafts a targeted HTTP request the user can run to demonstrate impact, and emits a leave-behind markdown report.",
-)
-async def generate_exploit(
-    run_id: str,
-    url: str,
-    specification: str = "",
-    source_dir: str = "",
-    output_path: str = "exploit-report.md",
-) -> str:
-    return _render(
-        _load_prompt_template("generate_exploit.md"),
-        run_id=run_id,
-        url=url,
-        specification=specification if specification else "(none)",
-        source_dir=source_dir if source_dir else "(none)",
-        output_path=output_path,
-    )
