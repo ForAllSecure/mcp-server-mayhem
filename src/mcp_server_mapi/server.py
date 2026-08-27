@@ -206,6 +206,7 @@ async def version() -> str:
 
 # Import for @mcp.tool/@mcp.prompt registration side effects (fires the decorators when this module loads).
 from . import mapi_tools  # noqa: F401
+from . import mayhem_tools  # noqa: F401
 
 
 def main():

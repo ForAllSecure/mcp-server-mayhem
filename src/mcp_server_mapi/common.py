@@ -71,6 +71,7 @@ _CREDENTIAL_FLAGS: frozenset[str] = frozenset({
     "--oauth2-client-data",
     "--oauth2-credentials",
     "--postman-api-key",
+    "--token",
 })
 
 
