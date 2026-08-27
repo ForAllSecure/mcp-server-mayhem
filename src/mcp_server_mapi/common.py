@@ -72,6 +72,7 @@ _CREDENTIAL_FLAGS: frozenset[str] = frozenset({
     "--oauth2-credentials",
     "--postman-api-key",
     "--token",
+    "--github-token",
 })
 
 
