@@ -1,9 +1,8 @@
 # We use the Astral UV image as a base, which includes Python and UV for dependency management
 FROM ghcr.io/astral-sh/uv:debian
 
-# Install mapi CLI
-RUN curl -o /usr/local/bin/mapi https://app.mayhem.security/cli/mapi/linux-musl/latest/mapi && \
-    chmod +x /usr/local/bin/mapi
+# Install mapi and mayhem CLI
+RUN curl --fail -L https://app.mayhem.security/cli/Linux/install.sh | sh
 
 # Set up app directory
 RUN mkdir /app
