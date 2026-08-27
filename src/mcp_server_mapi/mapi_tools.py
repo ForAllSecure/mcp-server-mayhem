@@ -21,7 +21,7 @@ from .common import (
     _comma_join,
     parse_duration,
 )
-from .server import mcp, MAPI_BIN
+from .server import mcp, MAPI_BIN, log
 
 
 # -----------------------------
