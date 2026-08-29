@@ -168,6 +168,87 @@ available.
 - Safety warnings appear at four points: prompt start, before each exploit is
   crafted, at the destructive-action gate, and after the report is generated.
 
+## Code Testing with `mayhem`
+
+This is a parallel capability to the API-testing tools above: fuzz testing of
+binaries and Docker images via the [`mayhem`](https://docs.mayhem.security/)
+CLI. Unlike the `mapi` capabilities, this is a straightforward sequential
+lifecycle - there's no iterative coverage-tuning loop or exploit-generation
+step, since neither has a meaningful mayhem equivalent.
+
+### Core lifecycle
+
+The typical path through a mayhem run:
+
+```
+mayhem_login → mayhem_validate → mayhem_run → mayhem_wait / mayhem_show
+```
+
+- `mayhem_login` - authenticates with a Mayhem server. Persists credentials to
+  the `~/.config/mayhem` XDG dir and logs into the Mayhem Docker registry.
+- `mayhem_validate` - checks that a packaged target's Mayhemfile is correct
+  before running it. Operates on a packaged directory, not a bare Docker
+  image tag.
+- `mayhem_run` - starts a run (regression/static/dynamic/coverage analysis)
+  against a packaged target directory or, with `docker = true`, directly
+  against a Docker image tag/hash. This tool has the largest flag surface in
+  the project - full parity with `mayhem run --help`, no trimming.
+- `mayhem_wait` - blocks until a run finishes and returns its results. Takes
+  a `poll_timeout_s` field (default 1800s / 30 minutes) that controls how
+  long the tool call itself is allowed to block, independent of the run's
+  own `--duration` - raise it for long-running targets. When `fail_on_defects`
+  is set, a run that completes with defects present is returned as a normal
+  result rather than raised as an error.
+- `mayhem_show` - a non-blocking snapshot of one or all runs, as an
+  alternative to `mayhem_wait` when you don't want to block.
+
+### Packaging a target
+
+Mayhem fuzzes Docker image contents directly, so a Docker-based target needs
+no local packaging step - it's the preferred path when a suitable image
+already exists. For targets that aren't already a Docker image:
+
+- `mayhem_package` - packages a local target binary and its dependencies for
+  Mayhem. This is the fallback path.
+- `mayhem_init` - scaffolds a Mayhemfile (from a Docker image, a language
+  template, or explicit flags) - the `mayhem_package` path's counterpart, and
+  the tool the `/onboard-mayhem-run` prompt points you to if you haven't
+  built or packaged a target yet.
+
+> [!NOTE]
+> Neither this server nor its prompts will author a fuzz harness, Dockerfile,
+> or Mayhemfile on your behalf. If a target isn't packaged or built yet,
+> `mayhem_init`/`mayhem_package` expect you to supply one - they package and
+> validate existing targets, they don't create them.
+
+### Other utility tools
+
+The remaining subcommands round out full `mayhem` CLI coverage:
+`mayhem_logout`, `mayhem_list` (projects/targets you've run), `mayhem_download`
+(a target and its test cases), `mayhem_sync` (refresh a package with the
+latest test cases), `mayhem_stop` (stop one or all runs for a target/project),
+`mayhem_check` (check whether local files are Mayhem-eligible), and
+`mayhem_docker_registry` (get the URI for Mayhem's Docker registry).
+
+### Onboarding prompt
+
+The `/onboard-mayhem-run` prompt walks through the lifecycle above end-to-end:
+it verifies login, asks whether you have a Docker image ready, an unpackaged
+local binary, or nothing built yet (stopping if the latter, since building a
+target is out of scope), packages and validates if needed, starts the run,
+and monitors it to completion.
+
+**Invoking the prompt:**
+
+In your MCP client, invoke `/onboard-mayhem-run` with the following arguments:
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `url` | yes | — | Base URL of the Mayhem server |
+| `project` | no | `""` | Mayhem project name, if already known |
+| `target` | no | `""` | Mayhem target name, if already known |
+| `owner` | no | `""` | Owner (user or organization) to scope calls to |
+
 ## Usage
 
 MCP servers connect to AI applications like Claude, Cursor, or VS Code Copilot.
