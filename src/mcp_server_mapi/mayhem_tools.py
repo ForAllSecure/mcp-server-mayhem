@@ -401,6 +401,8 @@ class MayhemWaitArgs(BaseModel):
     cacert: Optional[str] = Field(None, description="--cacert <path>: path to the mayhem server's certificate")
     timeout: Optional[int] = Field(None, description="--timeout <seconds>: seconds to wait for API responses (useful for slow connections)")
 
+    poll_timeout_s: int = Field(1800, description="How long, in seconds, this call is allowed to block waiting for the run to finish before giving up locally (independent of the platform's own run duration) — defaults to 30 minutes. Raise this if the run's configured --duration is expected to exceed it.")
+
 
 # -----------------------------
 # MCP tool for `mayhem wait`
@@ -443,7 +445,7 @@ async def mayhem_wait(args: MayhemWaitArgs, ctx: Context | None = None) -> str:
     cmd_str = "$ " + shlex.join(_redact_cmd(cmd))
     log.info("Running: %s", cmd_str[2:])
     try:
-        out = await run_cli(cmd, ctx=ctx)
+        out = await run_cli(cmd, ctx=ctx, timeout_s=args.poll_timeout_s)
         return f"{cmd_str}\n\n{out}"
     except CLIRuntimeError as e:
         if args.fail_on_defects and e.exit_code == 1:
