@@ -196,6 +196,28 @@ async def generate_exploit(
     )
 
 
+# -----------------------------
+# MCP prompt: onboard-mayhem-run
+# -----------------------------
+@mcp.prompt(
+    name="onboard-mayhem-run",
+    description="Orchestrate a simplified mayhem onboarding flow: verify login, diagnose target packaging state (Docker image ready / local binary / not yet built), package and validate if needed, run the target, and monitor for completion. No tuning loop or exploit-generation step.",
+)
+async def onboard_mayhem_run(
+    url: str,
+    project: str = "",
+    target: str = "",
+    owner: str = "",
+) -> str:
+    return _render(
+        _load_prompt_template("onboard_mayhem_run.md"),
+        url=url,
+        project=project if project else "(none)",
+        target=target if target else "(none)",
+        owner=owner if owner else "(none)",
+    )
+
+
 async def version() -> str:
     try:
         out = await run_cli([MAPI_BIN, "--version"], timeout_s=10.0, max_bytes=32_000)
