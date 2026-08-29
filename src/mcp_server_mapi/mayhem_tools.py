@@ -449,7 +449,10 @@ async def mayhem_wait(args: MayhemWaitArgs, ctx: Context | None = None) -> str:
         return f"{cmd_str}\n\n{out}"
     except CLIRuntimeError as e:
         if args.fail_on_defects and e.exit_code == 1:
-            return f"{cmd_str}\n\n{e.stdout}"
+            # mayhem writes its "defects found" summary to stderr (folded into
+            # str(e)), not stdout - fall back to it since e.stdout is empty here.
+            detail = e.stdout if e.stdout else str(e)
+            return f"{cmd_str}\n\n{detail}"
         raise RuntimeError(f"{cmd_str}\n\n{e}") from None
 
 
