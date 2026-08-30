@@ -42,8 +42,8 @@ local target path the user gave you. Capture the resulting package output
 directory as `package_dir` and use it as the `package` argument in Steps 4-5.
 
 If the user chose (a) (Docker image ready): no packaging call is needed here -
-the image tag/hash itself is the `package` argument for Steps 4-5, and `mayhem_run`
-will be called with `docker = true`.
+the image tag/hash itself is the `package` argument for Steps 4-5; `mayhem_run`
+treats it as docker-backed automatically, no extra flag needed.
 
 ## Step 4 - Validate
 
@@ -59,27 +59,40 @@ step and proceed to Step 5.
 
 ## Step 5 - Run the target
 
+Before calling `mayhem_run`, determine whether a duration is already set for
+this target: check `mayhem_validate`'s Step 4 output (or read `<package>/Mayhemfile`
+directly) for an existing `duration` field. If none is set anywhere and you are
+not passing one here, ask the user for a `duration` (in seconds) before running -
+see Step 6 for why this matters.
+
 Call `mayhem_run` with:
-  package = <package_dir, or the Docker image tag/hash from Step 3>
-  docker  = <true only if running directly against a Docker image tag/hash>
-  project = "<<project>>" (if known)
-  target  = "<<target>>" (if known)
-  owner   = "<<owner>>" (if set)
+  package  = <package_dir, or the Docker image tag/hash from Step 3>
+  duration = <seconds, if known or just obtained from the user>
+  project  = "<<project>>" (if known)
+  target   = "<<target>>" (if known)
+  owner    = "<<owner>>" (if set)
 
 Capture the run identifier from the output - you will need it for Step 6.
 
 ## Step 6 - Monitor for completion
 
-Call `mayhem_wait` with `run = <run identifier from Step 5>`.
-Use the default `poll_timeout_s` (1800s / 30 minutes) unless the target's
-configured `--duration` is expected to exceed it, in which case set
-`poll_timeout_s` higher up front rather than waiting for a timeout to occur.
+First check whether a duration is known for this run: passed to `mayhem_run` in
+Step 5, or already present in the Mayhemfile (per the Step 5 check).
 
-If you need a snapshot of run status without blocking further, use `mayhem_show`
-with the same run identifier instead.
+- **Duration known:** call `mayhem_wait` with `run = <run identifier from Step 5>`.
+  Use the default `poll_timeout_s` (1800s / 30 minutes) unless the duration is
+  expected to exceed it, in which case set `poll_timeout_s` higher up front
+  rather than waiting for a timeout to occur. Once `mayhem_wait` returns, present
+  the result to the user: whether the run completed, and (if `fail_on_defects`
+  was used) whether defects were present.
+- **No duration known:** do not call `mayhem_wait` - the run has no natural end,
+  so the call would just consume the full `poll_timeout_s` waiting for something
+  that never happens. Instead, tell the user the run is open-ended/continuous,
+  call `mayhem_show` with the run identifier for a non-blocking status snapshot,
+  and mention `mayhem_stop` as how they end it whenever they're ready.
 
-Once `mayhem_wait` returns, present the result to the user: whether the run
-completed, and (if `fail_on_defects` was used) whether defects were present.
+`mayhem_show` is always safe to call on demand for a non-blocking snapshot,
+regardless of whether a duration is set.
 
 ## Step 7 - Fix obvious errors
 
@@ -120,13 +133,16 @@ Present a final summary to the user:
   started/completed, or a blocking issue has been surfaced.
 - Never author a fuzz harness, Dockerfile, or Mayhemfile `cmds` entry on the
   user's behalf. If the target isn't built yet, stop at Step 2 and say so.
-- `docker = true` on `mayhem_run` means the `package` argument is a Docker
-  image tag/hash, not a directory - do not also call `mayhem_package` or
-  `mayhem_validate` against a bare image tag; those operate on a packaged
-  directory containing a Mayhemfile.
+- A bare Docker image tag/hash used directly as `package` (no packaged
+  directory) - do not also call `mayhem_package` or `mayhem_validate` against
+  it; those operate on a packaged directory containing a Mayhemfile.
 - `poll_timeout_s` on `mayhem_wait` is a local Python-side timeout controlling
   how long the tool call itself blocks - it is independent of the platform's
   own `--duration` for the run. Raise it proactively when a long duration is
   known upfront, per Step 6.
+- Never call `mayhem_wait` on a run with no duration set anywhere (not passed
+  to `mayhem_run`, not present in the Mayhemfile) - it will never complete on
+  its own, and the call would just burn the full `poll_timeout_s` for nothing.
+  Use `mayhem_show` for status on these runs instead, per Step 6.
 - Only retry the "fixable invocation mistake" category from Step 7, and only
   once per failure. Platform-side/environment issues always go to the user.
