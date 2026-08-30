@@ -1,5 +1,3 @@
-# Publish MCP Server MAPI Docker Image to GHCR
-
 name: Publish to GHCR
 
 on:
@@ -27,5 +25,4 @@ jobs:
         context: .
         file: ./Dockerfile
         push: true
-        # make sure repository is converted to lowercase
-        tags: ghcr.io/forallsecure/mcp-server-mapi:latest
+        tags: ghcr.io/forallsecure/mcp-server-mayhem:latest

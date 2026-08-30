@@ -249,7 +249,7 @@ async def mayhem_validate(args: MayhemValidateArgs, ctx: Context | None = None) 
 # Pydantic schema for `mayhem run`
 # -----------------------------
 class MayhemRunArgs(BaseModel):
-    package: str = Field(..., description="positional: path to the directory containing the packaged target (or a Docker image tag/hash if `docker` is set)")
+    package: str = Field(..., description="positional: path to the directory containing the packaged target")
 
     # Analysis selection
     regression: bool = Field(False, description="--regression: run regression tests on available test cases")
@@ -260,7 +260,6 @@ class MayhemRunArgs(BaseModel):
 
     file: Optional[str] = Field(None, description="-f/--file <path>: path to the Mayhemfile used (default: <package>/Mayhemfile)")
     build_id: Optional[str] = Field(None, description="-b/--build-id <id>: build id to associate with this specific run")
-    docker: bool = Field(False, description="--docker: indicates the `package` argument is a Docker image tag/hash rather than a packaged directory")
     warning_as_error: bool = Field(False, description="--warning-as-error: have the warnings be treated as errors")
     testsuite: Optional[str] = Field(None, description="--testsuite <dir>: specify a tests directory")
     ci_url: Optional[str] = Field(None, description="--ci-url <url>: URL to the Continuous Integration build you wish to associate with this run")
@@ -308,7 +307,7 @@ class MayhemRunArgs(BaseModel):
 @mcp.tool(
     description="""
     Run `mayhem run` to run a target through Mayhem (regression/static/dynamic/coverage analysis).
-    `package` is a path to a packaged target directory, or a Docker image tag/hash if `docker` is set.
+    `package` is a path to a packaged target directory.
     Use `mayhem_wait` afterward to block for completion and retrieve results.
     """
 )
@@ -323,7 +322,6 @@ async def mayhem_run(args: MayhemRunArgs, ctx: Context | None = None) -> str:
 
     _add_opt(cmd, "--file", args.file)
     _add_opt(cmd, "--build-id", args.build_id)
-    _add_flag(cmd, args.docker, "--docker")
     _add_flag(cmd, args.warning_as_error, "--warning-as-error")
     _add_opt(cmd, "--testsuite", args.testsuite)
     _add_opt(cmd, "--ci-url", args.ci_url)

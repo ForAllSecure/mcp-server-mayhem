@@ -14,7 +14,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = logging.getLogger("mcp_server_mapi")
+log = logging.getLogger("mcp_server_mayhem")
 
 from .cli_runner import run_cli
 from .common import _assert_under_cwd, _load_prompt_template, _render
@@ -27,7 +27,7 @@ mcp = FastMCP("MAPI Server")
 @mcp.tool(
     description=(
         "Read a file from the server's working directory. "
-        "NOTE: when mcp-server-mapi runs inside a Docker container this tool reads from the "
+        "NOTE: when mcp-server-mayhem runs inside a Docker container this tool reads from the "
         "container filesystem — it cannot access the user's local machine. "
         "For local source files, prefer the LLM's built-in file reading capability. "
         "This tool is most useful when the server runs locally via `uv run`."

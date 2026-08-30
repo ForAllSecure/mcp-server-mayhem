@@ -7,7 +7,7 @@ from typing import List, Optional
 
 def _load_prompt_template(name: str) -> str:
     return (
-        _pkg_files("mcp_server_mapi")
+        _pkg_files("mcp_server_mayhem")
         .joinpath("prompts")
         .joinpath(name)
         .read_text(encoding="utf-8")

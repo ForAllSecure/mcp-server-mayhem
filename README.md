@@ -1,8 +1,8 @@
-# MCP Server for `mapi`
+# MCP Server for `mayhem`
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for
-the [Mayhem for API](https://docs.mayhem.security/api-testing/summary/) CLI
-(`mapi`).
+the [Mayhem](https://docs.mayhem.security/) CLI
+(`mayhem`).
 
 > [!NOTE]
 > The code in this repository is provided as-is and is intended only for
@@ -13,7 +13,7 @@ the [Mayhem for API](https://docs.mayhem.security/api-testing/summary/) CLI
 
 > [!NOTE]
 > Not all MCP clients surface prompts as slash commands. VS Code Copilot shows
-> `/onboard-mapi-scan` and `/generate-exploit` in the prompt picker. Claude
+> slash commands in the prompt picker. Claude
 > Desktop, Claude Code, and most other clients require asking the model to run
 > the prompt by name (e.g., "Run the onboard-mapi-scan prompt") or using the
 > individual tools directly.
@@ -297,15 +297,15 @@ for global access):
 ```json
 {
   "mcpServers": {
-    "mapi": {
+    "mayhem": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
         "--network", "host",
         "-e", "MAYHEM_URL",
         "-e", "MAYHEM_TOKEN",
-        "ghcr.io/forallsecure/mcp-server-mapi:latest",
-        "uv", "run", "mcp-server-mapi", "mcp"
+        "ghcr.io/forallsecure/mcp-server-mayhem:latest",
+        "uv", "run", "mcp-server-mayhem", "mcp"
       ]
     }
   }
@@ -333,15 +333,15 @@ Add the following to `.windsurf/mcp.json` in your project (or
 ```json
 {
   "mcpServers": {
-    "mapi": {
+    "mayhem": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
         "--network", "host",
         "-e", "MAYHEM_URL",
         "-e", "MAYHEM_TOKEN",
-        "ghcr.io/forallsecure/mcp-server-mapi:latest",
-        "uv", "run", "mcp-server-mapi", "mcp"
+        "ghcr.io/forallsecure/mcp-server-mayhem:latest",
+        "uv", "run", "mcp-server-mayhem", "mcp"
       ]
     }
   }
@@ -366,15 +366,15 @@ configure globally with `claude mcp add`:
 ```json
 {
   "mcpServers": {
-    "mapi": {
+    "mayhem": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
         "--network", "host",
         "-e", "MAYHEM_URL",
         "-e", "MAYHEM_TOKEN",
-        "ghcr.io/forallsecure/mcp-server-mapi:latest",
-        "uv", "run", "mcp-server-mapi", "mcp"
+        "ghcr.io/forallsecure/mcp-server-mayhem:latest",
+        "uv", "run", "mcp-server-mayhem", "mcp"
       ]
     }
   }
@@ -406,15 +406,15 @@ Add the following to your Claude Desktop config file.
 ```json
 {
   "mcpServers": {
-    "mapi": {
+    "mayhem": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
         "--network", "host",
         "-e", "MAYHEM_URL",
         "-e", "MAYHEM_TOKEN",
-        "ghcr.io/forallsecure/mcp-server-mapi:latest",
-        "uv", "run", "mcp-server-mapi", "mcp"
+        "ghcr.io/forallsecure/mcp-server-mayhem:latest",
+        "uv", "run", "mcp-server-mayhem", "mcp"
       ]
     }
   }
@@ -452,7 +452,7 @@ This section describes how to acquire and run the code locally for development p
 Clone this repository:
 
 ```sh
-git clone git@github.com:ForAllSecure/mcp-server-mapi.git
+git clone git@github.com:ForAllSecure/mcp-server-mayhem.git
 ```
 
 ### Run
@@ -460,5 +460,5 @@ git clone git@github.com:ForAllSecure/mcp-server-mapi.git
 Use uv to run the MCP server for `mapi`:
 
 ```sh
-MAYHEM_TOKEN=your-token-here uv run mcp-server-mapi mcp
+MAYHEM_TOKEN=your-token-here uv run mcp-server-mayhem mcp
 ```

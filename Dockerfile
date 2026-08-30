@@ -19,4 +19,4 @@ COPY . .
 RUN uv pip install -e .
 
 # Install deps and run
-RUN uv run mcp-server-mapi version
+RUN uv run mcp-server-mayhem version
