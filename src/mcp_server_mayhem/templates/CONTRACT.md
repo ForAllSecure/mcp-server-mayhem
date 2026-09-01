@@ -100,6 +100,36 @@ how it got there. Never write a token literal into a template, and never echo th
 token in a pipeline step — CI logs are frequently world-readable. Assign it to an
 environment variable and let the CLI read it.
 
+## Registry login in the build job
+
+**There is no `<<registry>>` placeholder and no registry-credential placeholder.
+This is a decision, not an oversight.** Registry authentication is platform-native
+and varies too much to pre-render usefully, so each template uses whatever its own
+platform provides:
+
+| Platform | Approach |
+|---|---|
+| `github-actions` | Built-in `GITHUB_TOKEN` against ghcr.io. Zero configuration. |
+| `gitlab-ci` | Predefined `CI_REGISTRY`, `CI_REGISTRY_USER`, `CI_REGISTRY_PASSWORD`, supplied automatically for the integrated registry. Zero configuration. |
+| `jenkins` | A named credential the user configures, referenced through the credentials binding. |
+| `azure-devops` | A service connection the user configures, referenced by name. |
+
+GitHub and GitLab work out of the box. Jenkins and Azure DevOps genuinely cannot —
+neither has a zero-config registry credential — so their templates emit a login
+step with a **clearly marked placeholder credential name and a comment telling the
+user what to configure.** Make that comment specific: name the credential, say
+where it is configured, and say what happens if it is not.
+
+The registry host is carried implicitly by `<<image>>`, which is a full reference
+such as `ghcr.io/owner/repo:tag`. Templates that need the host separately should
+hardcode it with a comment directing the user to change it, following the GitHub
+template's pattern. Do not attempt to parse the host out of `<<image>>` — there is
+no expression language to do it in.
+
+This means the build job is not zero-configuration on two of the four platforms.
+That is accepted. Do not report it as a gap, and do not add a placeholder to close
+it.
+
 ## Conditional regions
 
 `include_build_job` cannot be expressed by substitution, so the build job is
