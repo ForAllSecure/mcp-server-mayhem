@@ -5,7 +5,9 @@ description = "A Model Context Protocol server providing tools to execute mayhem
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "mcp>=1.6.0",
+    # Upper bound is load-bearing: mcp 2.x renamed FastMCP to MCPServer, so every
+    # `from mcp.server.fastmcp import ...` in this package fails against it.
+    "mcp>=1.6.0,<2",
     "pydantic>=2.11.3",
     "typer>=0.17.4",
 ]
