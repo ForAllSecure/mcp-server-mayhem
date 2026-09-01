@@ -113,6 +113,7 @@ class MayhemInitArgs(BaseModel):
     sanitizer: Optional[str] = Field(None, description="--sanitizer <value>: whether sanitization is compiled in or not")
     max_length: Optional[int] = Field(None, description="--max-length <int>: maximum length for test cases")
     memory_limit: Optional[int] = Field(None, description="--memory-limit <MB>: how much memory to allow the target in megabytes")
+    cmd_timeout: Optional[int] = Field(None, description="--cmd-timeout <seconds>: max time to run the target for one invocation. This bounds how long a SINGLE test case may execute. It is not the overall length of the run (--duration), not the wait for the target to accept network input (--network-timeout), and not how long a local call blocks polling for a run to finish (mayhem_wait's poll_timeout_s)")
 
     @model_validator(mode="after")
     def _validate_positional(self):
@@ -159,6 +160,7 @@ async def mayhem_init(args: MayhemInitArgs, ctx: Context | None = None) -> str:
     _add_opt(cmd, "--sanitizer", args.sanitizer)
     _add_opt(cmd, "--max-length", args.max_length)
     _add_opt(cmd, "--memory-limit", args.memory_limit)
+    _add_opt(cmd, "--cmd-timeout", args.cmd_timeout)
 
     if args.image_url:
         cmd.append(args.image_url)
@@ -303,6 +305,7 @@ class MayhemRunArgs(BaseModel):
     sanitizer: Optional[str] = Field(None, description="--sanitizer <value>: whether sanitization is compiled in or not")
     max_length: Optional[int] = Field(None, description="--max-length <int>: maximum length for test cases")
     memory_limit: Optional[int] = Field(None, description="--memory-limit <MB>: how much memory to allow the target in megabytes")
+    cmd_timeout: Optional[int] = Field(None, description="--cmd-timeout <seconds>: max time to run the target for one invocation. This bounds how long a SINGLE test case may execute. It is not the overall length of the run (--duration), not the wait for the target to accept network input (--network-timeout), and not how long a local call blocks polling for a run to finish (mayhem_wait's poll_timeout_s)")
 
     # Connection
     url: Optional[str] = Field(None, description="--url <url>: URL to running Mayhem API")
@@ -363,6 +366,7 @@ async def mayhem_run(args: MayhemRunArgs, ctx: Context | None = None) -> str:
     _add_opt(cmd, "--sanitizer", args.sanitizer)
     _add_opt(cmd, "--max-length", args.max_length)
     _add_opt(cmd, "--memory-limit", args.memory_limit)
+    _add_opt(cmd, "--cmd-timeout", args.cmd_timeout)
 
     _add_opt(cmd, "--url", args.url)
     _add_opt(cmd, "--token", args.token)
