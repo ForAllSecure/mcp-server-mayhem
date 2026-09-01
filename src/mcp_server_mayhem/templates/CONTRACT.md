@@ -118,10 +118,38 @@ so dropping a region leaves no stray blank line and keeping one leaves no stray
 marker. Regions do not nest, and `build_job` is currently the only region name
 defined.
 
+**A template may use the same region name more than once.** `_optional_region`
+substitutes without a count limit, so every `<<#build_job>>` region in a file is
+kept or dropped together. This is what makes a conditional job dependency
+possible: put the job itself in one region and the `needs:`-equivalent that
+references it in a second, so dropping the build job also drops the reference and
+the remaining pipeline never names a job that does not exist. Every platform with
+a job-dependency construct needs this.
+
 Everything the build job needs must live inside the region. A template that
 references `<<image>>` outside the region still renders when the region is
 dropped, which is intended — the fuzz job needs the image regardless of whether
 this pipeline built it.
+
+**Reference the image as `<<image>>`, not as a build-job output.** Where a
+platform could expose the built image as a job output, doing so would require an
+if/else — the output when the build job exists, `<<image>>` when it does not —
+and there is no inverse region. Since the build job pushes exactly `<<image>>`,
+the two are the same value. All four templates use `<<image>>` directly.
+
+## Handling an empty image
+
+`image` is optional and is required only when `include_build_job` is true, so
+**`image=""` with no build job is a legal and realistic call** — a Mayhemfile
+declares its own `image:`, and an already-published image is the preferred
+packaging route.
+
+A naive `--image <<image>>` then renders `--image  --file …`, and the CLI
+consumes `--file` as the image value: a silent, plausible-looking breakage rather
+than an error. Every template must omit the whole flag when the value is empty,
+using whatever its platform provides — a workflow expression, a shell
+conditional, or a step condition. Verify it by rendering with no image and
+inspecting the argv the pipeline would build.
 
 ## Platform-to-file mapping
 
