@@ -1,0 +1,26 @@
+# STUB template - later work replaces this content with a real pipeline.
+# It exists so the loading path, packaging, and platform-to-file mapping can be
+# exercised end to end. Placeholder contract: see CONTRACT.md in this directory.
+#
+# MAYHEM_TOKEN must be defined as a masked CI/CD variable in project settings.
+stages:
+  - build
+  - fuzz
+
+<<#build_job>>
+build:
+  stage: build
+  script:
+    - echo "build <<image>> from <<dockerfile>> with context <<build_context>>"
+
+<</build_job>>
+mayhem:
+  stage: fuzz
+  parallel:
+    matrix:
+      - MAYHEMFILE: <<targets_list>>
+  variables:
+    MAYHEM_TOKEN: <<token_secret_ref>>
+    MAYHEM_URL: <<mayhem_url>>
+  script:
+    - echo "fuzz $MAYHEMFILE image=<<image>> duration=<<duration_seconds>>s"

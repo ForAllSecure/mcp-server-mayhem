@@ -5,10 +5,17 @@ from importlib.resources import files as _pkg_files
 from typing import List, Optional
 
 
-def _load_prompt_template(name: str) -> str:
+def _load_prompt_template(name: str, subdir: str = "prompts") -> str:
+    """Read a packaged text template out of `subdir` within the package.
+
+    Resolution goes through importlib.resources so loading works from an
+    installed wheel and inside the Docker image, not just from a source
+    checkout. `subdir` defaults to "prompts" so existing call sites are
+    unchanged; pass "templates" for the CI/CD templates.
+    """
     return (
         _pkg_files("mcp_server_mayhem")
-        .joinpath("prompts")
+        .joinpath(subdir)
         .joinpath(name)
         .read_text(encoding="utf-8")
     )
@@ -18,6 +25,21 @@ def _render(template: str, **kwargs: str) -> str:
     for key, value in kwargs.items():
         template = template.replace(f"<<{key}>>", value)
     return template
+
+
+def _optional_region(template: str, name: str, keep: bool) -> str:
+    """Keep or drop a `<<#name>> ... <</name>>` region, dropping the markers either way.
+
+    `_render` is plain string replacement with no conditional, so a template
+    cannot itself express an optional section. Marker lines are matched whole
+    (leading whitespace and trailing newline included) so removing a region
+    leaves no blank line behind.
+    """
+    pattern = re.compile(
+        rf"^[ \t]*<<#{re.escape(name)}>>[ \t]*\n(.*?)^[ \t]*<</{re.escape(name)}>>[ \t]*\n",
+        re.MULTILINE | re.DOTALL,
+    )
+    return pattern.sub((lambda m: m.group(1)) if keep else "", template)
 
 
 def _add_flag(argv: list[str], cond: bool, flag: str):

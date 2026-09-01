@@ -1,0 +1,35 @@
+# STUB template - later work replaces this content with a real pipeline.
+# It exists so the loading path, packaging, and platform-to-file mapping can be
+# exercised end to end. Placeholder contract: see CONTRACT.md in this directory.
+name: <<workflow_name>>
+
+on:
+  workflow_dispatch:
+
+jobs:
+<<#build_job>>
+  build:
+    name: build and push image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: STUB build and push
+        run: echo "build <<image>> from <<dockerfile>> with context <<build_context>>"
+<</build_job>>
+  mayhem:
+    name: fuzz ${{ matrix.mayhemfile }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mayhemfile: <<targets_list>>
+    steps:
+      - uses: actions/checkout@v4
+      - name: STUB run Mayhem
+        env:
+          MAYHEM_TOKEN: <<token_secret_ref>>
+          MAYHEM_URL: <<mayhem_url>>
+        run: echo "fuzz ${{ matrix.mayhemfile }} image=<<image>> duration=<<duration_seconds>>s"

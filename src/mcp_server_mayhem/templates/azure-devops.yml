@@ -1,0 +1,27 @@
+# STUB template - later work replaces this content with a real pipeline.
+# It exists so the loading path, packaging, and platform-to-file mapping can be
+# exercised end to end. Placeholder contract: see CONTRACT.md in this directory.
+#
+# MAYHEM_TOKEN must be defined as a secret pipeline variable.
+name: <<workflow_name>>
+
+trigger: none
+
+stages:
+<<#build_job>>
+  - stage: build
+    jobs:
+      - job: build_image
+        steps:
+          - script: echo "build <<image>> from <<dockerfile>> with context <<build_context>>"
+            displayName: STUB build and push
+<</build_job>>
+  - stage: fuzz
+    jobs:
+      - job: mayhem
+        steps:
+          - script: echo "fuzz <<targets_list>> image=<<image>> duration=<<duration_seconds>>s"
+            displayName: STUB run Mayhem
+            env:
+              MAYHEM_TOKEN: <<token_secret_ref>>
+              MAYHEM_URL: <<mayhem_url>>

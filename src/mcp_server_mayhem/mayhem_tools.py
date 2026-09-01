@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import shlex
 from typing import List, Literal, Optional
 
@@ -6,7 +7,17 @@ from pydantic import BaseModel, Field, model_validator
 from mcp.server.fastmcp import Context
 
 from .cli_runner import run_cli, CLIRuntimeError
-from .common import _add_flag, _add_opt, _add_repeat, _comma_join, _redact_cmd
+from .common import (
+    _add_flag,
+    _add_opt,
+    _add_repeat,
+    _comma_join,
+    _load_prompt_template,
+    _optional_region,
+    _redact_cmd,
+    _render,
+    parse_duration,
+)
 from .server import mcp, MAYHEM_BIN, log
 
 
@@ -721,3 +732,163 @@ async def mayhem_docker_registry(ctx: Context | None = None) -> str:
         return f"{cmd_str}\n\n{out}"
     except CLIRuntimeError as e:
         raise RuntimeError(f"{cmd_str}\n\n{e}") from None
+
+
+# -----------------------------
+# CI/CD template wiring for emit_cicd_config
+# -----------------------------
+# Platform -> stub template file. Extensions reflect what each file actually is:
+# three YAML pipelines and one Groovy Jenkinsfile.
+_CICD_TEMPLATE_FILES: dict[str, str] = {
+    "github-actions": "github-actions.yml",
+    "gitlab-ci": "gitlab-ci.yml",
+    "jenkins": "jenkins.groovy",
+    "azure-devops": "azure-devops.yml",
+}
+
+# How each platform references the Mayhem token from its own secret store.
+# Pre-rendered here rather than left to each template so that no template has to
+# invent a token reference - the failure mode of getting this wrong is a live
+# credential written into generated configuration.
+_CICD_TOKEN_SECRET_REFS: dict[str, str] = {
+    "github-actions": "${{ secrets.MAYHEM_TOKEN }}",
+    "gitlab-ci": "$MAYHEM_TOKEN",
+    "jenkins": "$MAYHEM_TOKEN",
+    "azure-devops": "$(MAYHEM_TOKEN)",
+}
+
+
+# -----------------------------
+# Pydantic schema for emit_cicd_config
+# -----------------------------
+class EmitCicdConfigArgs(BaseModel):
+    platform: Literal["github-actions", "gitlab-ci", "jenkins", "azure-devops"] = Field(
+        ...,
+        description=(
+            "CI/CD platform to generate configuration for. Determines both which template "
+            "is rendered and how the Mayhem token is referenced from that platform's secret store."
+        ),
+    )
+    mayhemfiles: List[str] = Field(
+        ...,
+        description=(
+            "Repository-relative paths to the Mayhemfile(s) to run, e.g. "
+            "['mayhem/Mayhemfile.server', 'mayhem/Mayhemfile.client']. Each becomes one "
+            "parallel leg of the generated pipeline, so this list drives the fan-out. "
+            "Must contain at least one path."
+        ),
+    )
+    duration: str = Field(
+        "300s",
+        description=(
+            "Per-target run duration. Accepts a unit-suffixed value like '300s', '5m', or "
+            "'2h20m', or a bare digit string interpreted as seconds. Normalized to whole "
+            "seconds in the generated configuration."
+        ),
+    )
+    image: Optional[str] = Field(
+        None,
+        description=(
+            "Docker image the fuzz job runs, e.g. 'ghcr.io/acme/target:mayhem'. When "
+            "include_build_job is true this is also the tag the build job pushes, and it is "
+            "required. Prefer an image that already exists over building one."
+        ),
+    )
+    include_build_job: bool = Field(
+        False,
+        description=(
+            "Include an upstream job that builds and pushes the Docker image before fuzzing. "
+            "Set false when the image is already published, which is the preferred case. "
+            "Requires image, dockerfile, and build_context when true."
+        ),
+    )
+    dockerfile: str = Field(
+        "Dockerfile",
+        description=(
+            "Repository-relative path to the Dockerfile the build job builds. Ignored unless "
+            "include_build_job is true. This server does not author Dockerfiles - the file "
+            "must already exist in the user's repository."
+        ),
+    )
+    build_context: str = Field(
+        ".",
+        description=(
+            "Docker build context directory for the build job, relative to the repository "
+            "root. Ignored unless include_build_job is true."
+        ),
+    )
+    mayhem_url: Optional[str] = Field(
+        None,
+        description=(
+            "Mayhem API URL, for self-hosted installations. Omit to let the Mayhem CLI use "
+            "its default. Never include a token in this value."
+        ),
+    )
+    workflow_name: str = Field(
+        "Mayhem",
+        description="Display name for the generated pipeline as shown in the platform's UI.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_cicd_args(self):
+        if not self.mayhemfiles:
+            raise ValueError("mayhemfiles must contain at least one Mayhemfile path")
+        if self.include_build_job and not self.image:
+            raise ValueError(
+                "image is required when include_build_job is true - the build job needs a tag to push"
+            )
+        return self
+
+
+def _cicd_duration_seconds(raw: str) -> int:
+    """Normalize a duration to whole seconds, accepting a bare digit string as seconds.
+
+    parse_duration requires a unit suffix, so a plain '300' is accepted here as a
+    convenience and treated as seconds.
+    """
+    value = raw.strip()
+    if value.isdigit():
+        return int(value)
+    return int(parse_duration(value))
+
+
+# -----------------------------
+# MCP tool: emit_cicd_config
+# -----------------------------
+@mcp.tool(
+    description="""
+    Generate CI/CD pipeline configuration that runs Mayhem over one or more Mayhemfiles,
+    for GitHub Actions, GitLab CI, Jenkins, or Azure DevOps.
+    Each Mayhemfile becomes one parallel leg of the pipeline. Optionally includes an
+    upstream job that builds and pushes the Docker image first - prefer an image that
+    already exists over building one.
+    The Mayhem token is always referenced from the platform's secret store; the generated
+    output never contains a token value.
+    Returns the rendered configuration as text. This tool writes no files - the caller is
+    responsible for saving the result into the user's repository at the path that platform
+    expects.
+    """
+)
+def emit_cicd_config(args: EmitCicdConfigArgs) -> str:
+    template = _load_prompt_template(
+        _CICD_TEMPLATE_FILES[args.platform], subdir="templates"
+    )
+
+    # `_render` cannot express a conditional, so the optional build job is a
+    # marked region that is kept or dropped before substitution.
+    template = _optional_region(template, "build_job", args.include_build_job)
+
+    return _render(
+        template,
+        workflow_name=args.workflow_name,
+        # A JSON array is simultaneously a YAML flow sequence and a Groovy list
+        # literal, so one single-line form works for all four platforms and
+        # carries no indentation coupling to its insertion point.
+        targets_list=json.dumps(args.mayhemfiles),
+        duration_seconds=str(_cicd_duration_seconds(args.duration)),
+        image=args.image or "",
+        token_secret_ref=_CICD_TOKEN_SECRET_REFS[args.platform],
+        mayhem_url=args.mayhem_url or "",
+        dockerfile=args.dockerfile,
+        build_context=args.build_context,
+    )
