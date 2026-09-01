@@ -813,12 +813,11 @@ def emit_scan_script(args: EmitScanScriptArgs) -> str:
         f"  {shlex.quote(args.duration)} \\",
         f"  {shlex.quote(args.specification)} \\",
         f"  --url {shlex.quote(args.url)} \\",
-        # f"  --har {args.har_output_path}",
+        f"  --har {shlex.quote(args.har_output_path)} \\",
     ]
-    if all_flags:
-        for i, flag in enumerate(all_flags):
-            suffix = " \\"
-            positional_and_opts.append(f"  {flag}{suffix}")
+    # Every line carries a trailing backslash; the "${@}" passthrough is always last.
+    for flag in all_flags:
+        positional_and_opts.append(f"  {flag} \\")
 
     script = "\n".join([
         "#!/usr/bin/env bash",
