@@ -1,10 +1,18 @@
-# STUB template - later work replaces this content with a real pipeline.
-# It exists so the loading path, packaging, and platform-to-file mapping can be
-# exercised end to end. Placeholder contract: see CONTRACT.md in this directory.
+# Runs one Mayhem analysis per Mayhemfile, fanning out over a matrix so that a
+# defect in one target does not stop the others.
+#
+# Requires a repository or organization secret named MAYHEM_TOKEN.
+# Placeholder contract: see CONTRACT.md in this directory.
 name: <<workflow_name>>
 
 on:
   workflow_dispatch:
+    inputs:
+      duration:
+        description: Fuzz seconds per target
+        type: string
+        required: false
+        default: '<<duration_seconds>>'
 
 jobs:
 <<#build_job>>
@@ -16,20 +24,51 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      - name: STUB build and push
-        run: echo "build <<image>> from <<dockerfile>> with context <<build_context>>"
+        with:
+          submodules: recursive
+
+      # Pushes to ghcr.io with the built-in GITHUB_TOKEN, which needs no extra
+      # secret. If the image tag below is on another registry, replace this step
+      # with that registry's login action and credentials.
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: <<build_context>>
+          file: <<dockerfile>>
+          push: true
+          tags: <<image>>
+
 <</build_job>>
   mayhem:
-    name: fuzz ${{ matrix.mayhemfile }}
+<<#build_job>>
+    needs: build
+<</build_job>>
+    name: 'fuzz ${{ matrix.mayhemfile }}'
     runs-on: ubuntu-latest
+    env:
+      # Empty when no image was supplied. The --image flag is then omitted from
+      # the run below and the image declared in the Mayhemfile is used instead.
+      TARGET_IMAGE: '<<image>>'
     strategy:
+      # One failing target must not cancel its siblings.
       fail-fast: false
       matrix:
         mayhemfile: <<targets_list>>
     steps:
       - uses: actions/checkout@v4
-      - name: STUB run Mayhem
-        env:
-          MAYHEM_TOKEN: <<token_secret_ref>>
-          MAYHEM_URL: <<mayhem_url>>
-        run: echo "fuzz ${{ matrix.mayhemfile }} image=<<image>> duration=<<duration_seconds>>s"
+
+      # mayhem-url is empty unless a self-hosted Mayhem instance was specified,
+      # in which case the action falls back to its own default.
+      - name: Start analysis for ${{ matrix.mayhemfile }}
+        uses: ForAllSecure/mcode-action@v1
+        with:
+          mayhem-token: <<token_secret_ref>>
+          mayhem-url: '<<mayhem_url>>'
+          args: --file ${{ matrix.mayhemfile }} --duration ${{ inputs.duration || '<<duration_seconds>>' }}${{ env.TARGET_IMAGE && format(' --image {0}', env.TARGET_IMAGE) || '' }}
