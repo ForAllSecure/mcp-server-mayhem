@@ -21,7 +21,7 @@ from .common import _assert_under_cwd, _load_prompt_template, _render
 
 MAPI_BIN = os.environ.get("MAPI_BIN", "/usr/local/bin/mapi")  # override in env if needed
 MAYHEM_BIN = os.environ.get("MAYHEM_BIN", "/usr/local/bin/mayhem")  # override in env if needed
-mcp = FastMCP("MAPI Server")
+mcp = FastMCP("Mayhem Server")
 
 
 @mcp.tool(
@@ -81,7 +81,7 @@ def read_file(
         return f"Error reading file: {str(e)}"
 
 
-@mcp.tool(description="Edit a file on the MAPI server host with find-and-replace operations.")
+@mcp.tool(description="Edit a file on the Mayhem server host with find-and-replace operations.")
 def edit_file(
     file_path: str, old_text: str, new_text: str, replace_all: bool = False
 ) -> str:
@@ -220,10 +220,20 @@ async def onboard_mayhem_run(
 
 async def version() -> str:
     try:
-        out = await run_cli([MAPI_BIN, "--version"], timeout_s=10.0, max_bytes=32_000)
+        mapi_ver = await run_cli([MAPI_BIN, "--version"], timeout_s=10.0, max_bytes=32_000)
+        mapi_ver = mapi_ver.strip()
     except Exception as e:
-        out = f"(error retrieving version) {e}"
-    return f"server=MAPI Server; mapi_bin={MAPI_BIN}; mapi_version={out.strip()}"
+        mapi_ver = f"(error retrieving version) {e}"
+    try:
+        mayhem_ver = await run_cli([MAYHEM_BIN, "--version"], timeout_s=10.0, max_bytes=32_000)
+        mayhem_ver = mayhem_ver.strip()
+    except Exception as e:
+        mayhem_ver = f"(error retrieving version) {e}"
+    return (
+        f"server=Mayhem Server; "
+        f"mapi_bin={MAPI_BIN}; mapi_version={mapi_ver}; "
+        f"mayhem_bin={MAYHEM_BIN}; mayhem_version={mayhem_ver}"
+    )
 
 
 # Import for @mcp.tool/@mcp.prompt registration side effects (fires the decorators when this module loads).
@@ -233,7 +243,7 @@ from . import mayhem_tools  # noqa: F401
 
 def main():
     if os.environ.get("MAYHEM_TOKEN") is None:
-        log.error("MAYHEM_TOKEN not set; cannot start MAPI server")
+        log.error("MAYHEM_TOKEN not set; cannot start Mayhem server")
         sys.exit(1)
-    log.info("Starting MAPI Server on stdio...")
+    log.info("Starting Mayhem Server on stdio...")
     mcp.run(transport="stdio")
