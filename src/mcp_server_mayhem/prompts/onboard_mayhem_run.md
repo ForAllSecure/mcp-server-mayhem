@@ -80,9 +80,11 @@ Docker-based target needs no local packaging step. (b) requires `mayhem_package`
 first (Step 4). Confirm with the user rather than guessing from context.
 
 **If (c): stop here.** Tell the user that building a fuzz harness, Dockerfile, or
-target is out of scope for this flow - **never author one on the user's behalf**,
-even if asked to help. Point them to `mayhem init` / `mayhem_init` as the tool for
-scaffolding a Mayhemfile once they have something to package, and end the flow.
+target is outside what these tools do - they wrap the Mayhem CLI, and none of them
+authors a harness or a Dockerfile. Building the target is the user's own work, or
+yours by other means; it is simply not something this flow performs. Point them to
+`mayhem init` / `mayhem_init` as the tool for scaffolding a Mayhemfile once they
+have something to package, and end the flow.
 
 ## Step 4 - Package the target if needed
 
@@ -223,8 +225,9 @@ Present a final summary to the user:
   exploit-generation step - those are `mapi`-specific (`onboard-mapi-scan`)
   and have no mayhem equivalent. End the flow once a run is confirmed
   started/completed, or a blocking issue has been surfaced.
-- Never author a fuzz harness, Dockerfile, or Mayhemfile `cmds` entry on the
-  user's behalf. If the target isn't built yet, stop at Step 3 and say so.
+- Authoring a fuzz harness, Dockerfile, or Mayhemfile `cmds` entry is outside what
+  these tools do - none of them writes one. If the target isn't built yet, stop at
+  Step 3 and say so rather than treating it as this flow's job.
 - A bare Docker image tag/hash used directly as `package` (no packaged
   directory) - do not also call `mayhem_package` or `mayhem_validate` against
   it; those operate on a packaged directory containing a Mayhemfile.
