@@ -37,7 +37,7 @@ by `json.dumps`:
 ["mayhem/Mayhemfile.server", "mayhem/Mayhemfile.client"]
 ```
 
-This one form is valid in all four platforms, because a JSON array is
+This one form is a valid *value* in all four platforms, because a JSON array is
 simultaneously a YAML flow sequence and a Groovy list literal. Use it inline:
 
 ```yaml
@@ -57,6 +57,17 @@ column. The flow form removes that coupling: it is correct at any indentation.
 Element values are escaped by `json.dumps`, so paths containing quotes or
 backslashes are safe. Do not add your own quoting around the placeholder — it is
 already a complete, quoted array.
+
+**Known limitation, Jenkins.** Being a valid value is not the same as being
+accepted everywhere a value can go. Jenkins' *declarative* `matrix` directive
+requires its axis `values` to be parse-time string constants — `ModelParser.parseAxis`
+collects each argument as a constant, so a bracketed list arrives as one
+non-constant expression, and JENKINS-62127 tracks dynamic axis values as
+unimplemented. The Jenkins template therefore fans out with a **scripted `parallel`
+map** built from the list, which consumes `<<targets_list>>` exactly as intended.
+If the declarative `matrix` directive is ever genuinely required, that needs a new
+placeholder rendering the list unbracketed (`"a", "b"`) — a contract change, not a
+local workaround.
 
 **Known limitation, Azure DevOps.** Azure's `strategy: matrix:` takes a *mapping*
 of named legs, not a sequence, so `<<targets_list>>` will not drop into it the way
@@ -78,7 +89,7 @@ an empty value.
 | `<<duration_seconds>>` | bare integer, no unit suffix | Per-target run duration in seconds. `300`, not `300s` and not `5m`. Append a literal `s` yourself if your platform's flag wants one. |
 | `<<image>>` | plain scalar, may be empty | Docker image reference the fuzz job runs. When `include_build_job` is set this is also the tag the build job pushes. |
 | `<<token_secret_ref>>` | **pre-rendered** platform-specific expression | How this platform references the Mayhem token from its secret store. See below. |
-| `<<mayhem_url>>` | plain scalar, may be empty | Mayhem API URL, for self-hosted installs. Empty means the CLI default applies. |
+| `<<mayhem_url>>` | plain scalar, may be empty | Mayhem API URL, for self-hosted installs. **Empty does not mean "the CLI default applies"** — see below. |
 | `<<dockerfile>>` | plain scalar, defaults to `Dockerfile` | Dockerfile path for the build job. Meaningless when the build region is dropped. |
 | `<<build_context>>` | plain scalar, defaults to `.` | Docker build context for the build job. Meaningless when the build region is dropped. |
 
@@ -99,6 +110,21 @@ ends up in a generated file. Values by platform:
 how it got there. Never write a token literal into a template, and never echo the
 token in a pipeline step — CI logs are frequently world-readable. Assign it to an
 environment variable and let the CLI read it.
+
+### `<<mayhem_url>>` has no implicit default
+
+**A template that invokes the CLI directly must supply its own fallback.** Verified
+against the live CLI: with `MAYHEM_URL=""` it attempts to resolve a host literally
+named `none`; with `MAYHEM_URL` unset it refuses to authenticate even given a valid
+token. There is no implicit default on the environment-variable auth path.
+
+Use `${MAYHEM_URL:-https://app.mayhem.security}` or the platform's equivalent. This
+is the same class of hazard as the empty `--image`: an empty value produces a
+confusing runtime failure rather than an error you can see in the rendered file.
+
+The GitHub Actions template is the exception and needs no fallback, because
+`mcode-action` applies its own default — `getInput("mayhem-url") || "https://app.mayhem.security"`,
+where an empty string is falsy. That safety comes from the action, not from the CLI.
 
 ## Registry login in the build job
 
