@@ -1,27 +1,107 @@
-# STUB template - later work replaces this content with a real pipeline.
-# It exists so the loading path, packaging, and platform-to-file mapping can be
-# exercised end to end. Placeholder contract: see CONTRACT.md in this directory.
+# Runs one Mayhem analysis per Mayhemfile, fanning out over a job matrix so that
+# a defect in one target does not stop the others.
 #
-# MAYHEM_TOKEN must be defined as a secret pipeline variable.
-name: <<workflow_name>>
+# Requires a secret pipeline variable named MAYHEM_TOKEN. Secret variables are
+# deliberately not mapped into the environment by Azure, so the fuzz step maps it
+# explicitly as <<token_secret_ref>>; the CLI then reads it from the environment
+# rather than from a command-line flag, where it would be visible in the log.
+#
+# Placeholder contract: see CONTRACT.md in this directory.
+
+# Azure's strategy.matrix takes a mapping of named legs rather than a sequence,
+# so the target list arrives as a parameter and is expanded into legs below.
+parameters:
+  - name: mayhemfiles
+    type: object
+    default: <<targets_list>>
+  # Per-target run duration in seconds. Override it for a single run from the
+  # "Run pipeline" dialog without regenerating this file.
+  - name: durationSeconds
+    type: number
+    default: <<duration_seconds>>
 
 trigger: none
+
+variables:
+  - name: MAYHEM_DURATION
+    value: ${{ parameters.durationSeconds }}
+  # Empty unless a self-hosted Mayhem instance was specified. The fuzz step falls
+  # back to the public API when this is empty - an empty MAYHEM_URL passed to the
+  # CLI is not treated as "unset", it is treated as a literal host name.
+  - name: MAYHEM_URL
+    value: '<<mayhem_url>>'
+  # Empty when no image was supplied, in which case --image is omitted entirely
+  # below and the image declared in the Mayhemfile is used instead.
+  - name: TARGET_IMAGE
+    value: '<<image>>'
 
 stages:
 <<#build_job>>
   - stage: build
+    displayName: build and push image
     jobs:
       - job: build_image
+        pool:
+          vmImage: ubuntu-latest
         steps:
-          - script: echo "build <<image>> from <<dockerfile>> with context <<build_context>>"
-            displayName: STUB build and push
+          - checkout: self
+            submodules: recursive
+
+          # 'mayhem-registry' is a placeholder. Create a Docker Registry service
+          # connection under Project settings > Service connections, point it at
+          # the registry that hosts TARGET_IMAGE, and put its name here. Azure
+          # has no zero-configuration registry credential, so until this exists
+          # the stage fails at "docker push" with an authentication error.
+          - task: Docker@2
+            displayName: log in to the container registry
+            inputs:
+              command: login
+              containerRegistry: mayhem-registry
+
+          - bash: |
+              set -euo pipefail
+              docker build -t "$TARGET_IMAGE" -f "<<dockerfile>>" "<<build_context>>"
+              docker push "$TARGET_IMAGE"
+            displayName: build and push
 <</build_job>>
   - stage: fuzz
+    displayName: <<workflow_name>>
+<<#build_job>>
+    dependsOn: build
+<</build_job>>
     jobs:
       - job: mayhem
+        # Each leg is a separate job and Azure does not cancel the siblings of a
+        # failed job, so one failing target leaves the others running to
+        # completion. Leg names must be identifiers, so the path separators and
+        # dots in each Mayhemfile path are replaced to form the name.
+        strategy:
+          matrix:
+            ${{ each mayhemfile in parameters.mayhemfiles }}:
+              ${{ replace(replace(mayhemfile, '/', '_'), '.', '_') }}:
+                MAYHEMFILE: ${{ mayhemfile }}
+        pool:
+          vmImage: ubuntu-latest
         steps:
-          - script: echo "fuzz <<targets_list>> image=<<image>> duration=<<duration_seconds>>s"
-            displayName: STUB run Mayhem
+          - checkout: self
+
+          - bash: |
+              set -euo pipefail
+              # Fall back to the public API when no self-hosted URL was configured.
+              export MAYHEM_URL="${MAYHEM_URL:-https://app.mayhem.security}"
+              # The CLI is a single statically linked binary served by the Mayhem
+              # cluster, which is how the official GitHub Action obtains it too.
+              curl -fsSL "$MAYHEM_URL/cli/Linux/mayhem" -o "$AGENT_TEMPDIRECTORY/mayhem"
+              chmod +x "$AGENT_TEMPDIRECTORY/mayhem"
+              # --image is omitted entirely when no image was supplied. Passing an
+              # empty value would make the CLI consume the next flag as the image.
+              if [ -n "${TARGET_IMAGE:-}" ]; then
+                "$AGENT_TEMPDIRECTORY/mayhem" run . --file "$MAYHEMFILE" --duration "$MAYHEM_DURATION" --image "$TARGET_IMAGE"
+              else
+                "$AGENT_TEMPDIRECTORY/mayhem" run . --file "$MAYHEMFILE" --duration "$MAYHEM_DURATION"
+              fi
+            displayName: run Mayhem
             env:
+              # Secret variables are not auto-mapped into the environment; this
+              # mapping is what makes the token reach the CLI.
               MAYHEM_TOKEN: <<token_secret_ref>>
-              MAYHEM_URL: <<mayhem_url>>
