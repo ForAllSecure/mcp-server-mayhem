@@ -16,3 +16,6 @@ CLAUDE.md
 
 # Demo
 mayhem-demo/
+
+# User-supplied reference document; kept untracked so it stays out of the built package
+src/mcp_server_mayhem/cicd-example.yaml

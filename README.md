@@ -1,8 +1,8 @@
-# MCP Server for `mapi`
+# MCP Server for `mayhem`
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server for
-the [Mayhem for API](https://docs.mayhem.security/api-testing/summary/) CLI
-(`mapi`).
+the [Mayhem](https://docs.mayhem.security/) CLI
+(`mayhem`).
 
 > [!NOTE]
 > The code in this repository is provided as-is and is intended only for
@@ -13,7 +13,7 @@ the [Mayhem for API](https://docs.mayhem.security/api-testing/summary/) CLI
 
 > [!NOTE]
 > Not all MCP clients surface prompts as slash commands. VS Code Copilot shows
-> `/onboard-mapi-scan` and `/generate-exploit` in the prompt picker. Claude
+> slash commands in the prompt picker. Claude
 > Desktop, Claude Code, and most other clients require asking the model to run
 > the prompt by name (e.g., "Run the onboard-mapi-scan prompt") or using the
 > individual tools directly.
@@ -168,6 +168,146 @@ available.
 - Safety warnings appear at four points: prompt start, before each exploit is
   crafted, at the destructive-action gate, and after the report is generated.
 
+## Code Testing with `mayhem`
+
+This is a parallel capability to the API-testing tools above: fuzz testing of
+binaries and Docker images via the [`mayhem`](https://docs.mayhem.security/)
+CLI. Unlike the `mapi` capabilities, this is a straightforward sequential
+lifecycle - there's no iterative coverage-tuning loop or exploit-generation
+step, since neither has a meaningful mayhem equivalent.
+
+### Core lifecycle
+
+The typical path through a mayhem run:
+
+```
+mayhem_login → mayhem_validate → mayhem_run → mayhem_wait / mayhem_show
+```
+
+- `mayhem_login` - authenticates with a Mayhem server. Persists credentials to
+  the `~/.config/mayhem` XDG dir and logs into the Mayhem Docker registry.
+- `mayhem_validate` - checks that a packaged target's Mayhemfile is correct
+  before running it. Operates on a packaged directory, not a bare Docker
+  image tag.
+- `mayhem_run` - starts a run (regression/static/dynamic/coverage analysis)
+  against a packaged target directory, or against a Docker image tag/hash
+  passed directly as `package`. This tool has the largest flag surface in
+  the project - full parity with `mayhem run --help`, no trimming.
+- `mayhem_wait` - blocks until a run finishes and returns its results. Takes
+  a `poll_timeout_s` field (default 1800s / 30 minutes) that controls how
+  long the tool call itself is allowed to block, independent of the run's
+  own `--duration` - raise it for long-running targets. When `fail_on_defects`
+  is set, a run that completes with defects present is returned as a normal
+  result rather than raised as an error.
+- `mayhem_show` - a non-blocking snapshot of one or all runs, as an
+  alternative to `mayhem_wait` when you don't want to block.
+
+### Packaging a target
+
+Mayhem fuzzes Docker image contents directly, so a Docker-based target needs
+no local packaging step - it's the preferred path when a suitable image
+already exists. For targets that aren't already a Docker image:
+
+- `mayhem_package` - packages a local target binary and its dependencies for
+  Mayhem. This is the fallback path.
+- `mayhem_init` - scaffolds a Mayhemfile (from a Docker image, a language
+  template, or explicit flags) - the `mayhem_package` path's counterpart, and
+  the tool the `/onboard-mayhem-run` prompt points you to if you haven't
+  built or packaged a target yet.
+
+> [!NOTE]
+> Neither this server nor its prompts will author a fuzz harness, Dockerfile,
+> or Mayhemfile on your behalf. If a target isn't packaged or built yet,
+> `mayhem_init`/`mayhem_package` expect you to supply one - they package and
+> validate existing targets, they don't create them.
+
+### Other utility tools
+
+The remaining subcommands round out full `mayhem` CLI coverage:
+`mayhem_logout`, `mayhem_list` (projects/targets you've run), `mayhem_download`
+(a target and its test cases), `mayhem_sync` (refresh a package with the
+latest test cases), `mayhem_stop` (stop one or all runs for a target/project),
+`mayhem_check` (check whether local files are Mayhem-eligible), and
+`mayhem_docker_registry` (get the URI for Mayhem's Docker registry).
+
+### CI/CD generation
+
+`emit_cicd_config` generates pipeline configuration that reruns a target in CI.
+The `platform` argument takes exactly four values: `github-actions`,
+`gitlab-ci`, `jenkins`, and `azure-devops`.
+
+It fans out one CI job per Mayhemfile, so targets run in parallel and a failing
+target does not stop its siblings.
+
+- **The tool returns text and writes nothing.** The client agent writes the file
+  where the platform expects it. This is deliberate, and differs from the older
+  `emit_scan_script`, `emit_mapi_config`, and `emit_exploit_report` tools, which
+  do write to disk.
+- **The Mayhem token always comes from the platform's secret store** -
+  `${{ secrets.MAYHEM_TOKEN }}` on GitHub Actions, a masked CI/CD variable on
+  GitLab, a credentials binding on Jenkins, a secret pipeline variable on Azure
+  DevOps. A token value never appears in the generated configuration.
+- GitHub Actions uses the official
+  [`ForAllSecure/mcode-action`](https://github.com/ForAllSecure/mcode-action).
+  The other three invoke the `mayhem` CLI directly.
+- `include_build_job` adds an upstream build-and-push job, for repositories that
+  build their image in the same pipeline. Registry login is zero-configuration
+  on GitHub Actions and GitLab, which each supply a token for their own
+  registry. Jenkins and Azure DevOps have no equivalent, so those templates
+  reference a placeholder credential you need to create before the build job
+  will run. Prefer an image that already exists over building one here.
+
+**Verification status.** All four templates render without residual
+placeholders, and the `mayhem` command line each one builds has been executed
+against stub binaries with its arguments recorded. The GitHub Actions and GitLab
+output validates against those platforms' published schemas, and the Azure
+DevOps output against a corrected copy of Microsoft's. No Groovy parser was run
+against the Jenkins template; it has had structural review only. **No pipeline
+has been executed on any platform.**
+
+### Repository layout advisory
+
+Step 2 of the onboarding prompt reviews how the repository is arranged, reasoning
+about three properties:
+
+- Are Mayhemfiles discoverable in a predictable location?
+- Is each target's configuration separable from every other target's?
+- Is harness source distinct from Mayhem configuration?
+
+It reports what it observes and what it would recommend, then stops. It never
+creates directories, moves files, or writes configuration without your explicit
+agreement.
+
+It advises rather than enforces because there is nothing to enforce against:
+Mayhem's documentation specifies no convention for where Mayhemfiles live and
+does not address repositories holding several of them, and real repositories
+differ. Where a language already has a convention, the step follows it instead of
+overriding it - Go fuzz targets live in `_test.go` files via `testing.F` with no
+separate harness directory, and Rust's `cargo-fuzz` standardizes
+`fuzz/fuzz_targets/`. It is a thin pass over the three properties above, not a
+linter or a scoring system.
+
+### Onboarding prompt
+
+The `/onboard-mayhem-run` prompt walks through the lifecycle above end-to-end in
+ten steps: it verifies login, reviews repository layout and offers a
+recommendation, asks whether you have a Docker image ready, an unpackaged
+local binary, or nothing built yet (stopping if the latter, since building a
+target is outside what these tools do), packages and validates if needed, starts
+the run, monitors it to completion, and then offers to generate CI/CD
+configuration so the run is repeatable.
+
+**Invoking the prompt:**
+
+In your MCP client, invoke `/onboard-mayhem-run` with the following arguments:
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `url` | yes | — | Base URL of the Mayhem server |
+| `project` | no | `""` | Mayhem project name, if already known |
+| `target` | no | `""` | Mayhem target name, if already known |
+| `owner` | no | `""` | Owner (user or organization) to scope calls to |
+
 ## Usage
 
 MCP servers connect to AI applications like Claude, Cursor, or VS Code Copilot.
@@ -216,15 +356,15 @@ for global access):
 ```json
 {
   "mcpServers": {
-    "mapi": {
+    "mayhem": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
         "--network", "host",
         "-e", "MAYHEM_URL",
         "-e", "MAYHEM_TOKEN",
-        "ghcr.io/forallsecure/mcp-server-mapi:latest",
-        "uv", "run", "mcp-server-mapi", "mcp"
+        "ghcr.io/forallsecure/mcp-server-mayhem:latest",
+        "uv", "run", "mcp-server-mayhem", "mcp"
       ]
     }
   }
@@ -252,15 +392,15 @@ Add the following to `.windsurf/mcp.json` in your project (or
 ```json
 {
   "mcpServers": {
-    "mapi": {
+    "mayhem": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
         "--network", "host",
         "-e", "MAYHEM_URL",
         "-e", "MAYHEM_TOKEN",
-        "ghcr.io/forallsecure/mcp-server-mapi:latest",
-        "uv", "run", "mcp-server-mapi", "mcp"
+        "ghcr.io/forallsecure/mcp-server-mayhem:latest",
+        "uv", "run", "mcp-server-mayhem", "mcp"
       ]
     }
   }
@@ -285,15 +425,15 @@ configure globally with `claude mcp add`:
 ```json
 {
   "mcpServers": {
-    "mapi": {
+    "mayhem": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
         "--network", "host",
         "-e", "MAYHEM_URL",
         "-e", "MAYHEM_TOKEN",
-        "ghcr.io/forallsecure/mcp-server-mapi:latest",
-        "uv", "run", "mcp-server-mapi", "mcp"
+        "ghcr.io/forallsecure/mcp-server-mayhem:latest",
+        "uv", "run", "mcp-server-mayhem", "mcp"
       ]
     }
   }
@@ -325,15 +465,15 @@ Add the following to your Claude Desktop config file.
 ```json
 {
   "mcpServers": {
-    "mapi": {
+    "mayhem": {
       "command": "docker",
       "args": [
         "run", "-i", "--rm",
         "--network", "host",
         "-e", "MAYHEM_URL",
         "-e", "MAYHEM_TOKEN",
-        "ghcr.io/forallsecure/mcp-server-mapi:latest",
-        "uv", "run", "mcp-server-mapi", "mcp"
+        "ghcr.io/forallsecure/mcp-server-mayhem:latest",
+        "uv", "run", "mcp-server-mayhem", "mcp"
       ]
     }
   }
@@ -371,7 +511,7 @@ This section describes how to acquire and run the code locally for development p
 Clone this repository:
 
 ```sh
-git clone git@github.com:ForAllSecure/mcp-server-mapi.git
+git clone git@github.com:ForAllSecure/mcp-server-mayhem.git
 ```
 
 ### Run
@@ -379,5 +519,5 @@ git clone git@github.com:ForAllSecure/mcp-server-mapi.git
 Use uv to run the MCP server for `mapi`:
 
 ```sh
-MAYHEM_TOKEN=your-token-here uv run mcp-server-mapi mcp
+MAYHEM_TOKEN=your-token-here uv run mcp-server-mayhem mcp
 ```

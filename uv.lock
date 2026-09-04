@@ -180,7 +180,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mcp-server-mapi"
+name = "mcp-server-mayhem"
 version = "0.5.0"
 source = { editable = "." }
 dependencies = [
@@ -191,7 +191,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.6.0" },
+    { name = "mcp", specifier = ">=1.6.0,<2" },
     { name = "pydantic", specifier = ">=2.11.3" },
     { name = "typer", specifier = ">=0.17.4" },
 ]

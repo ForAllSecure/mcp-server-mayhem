@@ -1,0 +1,83 @@
+# Runs one Mayhem analysis per Mayhemfile, fanning out over a parallel matrix so
+# that a defect in one target does not stop the others.
+#
+# Requires a masked CI/CD variable named MAYHEM_TOKEN, set under
+# Settings > CI/CD > Variables. GitLab injects project variables into every job,
+# and the Mayhem CLI reads the token from the environment as <<token_secret_ref>>.
+# It is never passed as a command-line flag, where it would be visible in the
+# job log and the process list.
+#
+# Placeholder contract: see CONTRACT.md in this directory.
+workflow:
+  name: <<workflow_name>>
+
+stages:
+<<#build_job>>
+  - build
+<</build_job>>
+  - fuzz
+
+variables:
+  # Per-target run duration in seconds. Override it for a single pipeline from
+  # "Run pipeline" without regenerating this file.
+  MAYHEM_DURATION: '<<duration_seconds>>'
+  # Empty unless a self-hosted Mayhem instance was specified. The fuzz job falls
+  # back to the public API when this is empty - an empty MAYHEM_URL passed to the
+  # CLI is not treated as "unset", it is treated as a literal host name.
+  MAYHEM_URL: '<<mayhem_url>>'
+  # Empty when no image was supplied, in which case --image is omitted entirely
+  # below and the image declared in the Mayhemfile is used instead.
+  TARGET_IMAGE: '<<image>>'
+
+<<#build_job>>
+build:
+  stage: build
+  image: docker:27-cli
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: '/certs'
+    DOCKER_TLS_VERIFY: '1'
+    DOCKER_CERT_PATH: '$DOCKER_TLS_CERTDIR/client'
+    GIT_SUBMODULE_STRATEGY: recursive
+  script:
+    # CI_REGISTRY, CI_REGISTRY_USER and CI_REGISTRY_PASSWORD are predefined by
+    # GitLab for its integrated container registry, so this login needs no setup.
+    # If TARGET_IMAGE is hosted on a different registry, replace this one line
+    # with that registry's login. The password is piped rather than passed with
+    # -p so it does not appear in the job log.
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+    - docker build -t "$TARGET_IMAGE" -f "<<dockerfile>>" "<<build_context>>"
+    - docker push "$TARGET_IMAGE"
+
+<</build_job>>
+mayhem:
+  stage: fuzz
+<<#build_job>>
+  needs:
+    - build
+<</build_job>>
+  image: alpine:3.20
+  # Every matrix leg is an independent job. GitLab does not cancel the siblings
+  # of a failed job, so one failing target leaves the others running to
+  # completion and each reports its own status.
+  parallel:
+    matrix:
+      - MAYHEMFILE: <<targets_list>>
+  script:
+    - apk add --no-cache curl ca-certificates
+    # Fall back to the public API when no self-hosted URL was configured.
+    - export MAYHEM_URL="${MAYHEM_URL:-https://app.mayhem.security}"
+    # The CLI is a single statically linked binary served by the Mayhem cluster,
+    # which is how the official GitHub Action obtains it too.
+    - curl -fsSL "$MAYHEM_URL/cli/Linux/mayhem" -o /usr/local/bin/mayhem
+    - chmod +x /usr/local/bin/mayhem
+    # --image is omitted entirely when no image was supplied. Passing an empty
+    # value would make the CLI consume the next flag as the image name.
+    - |
+      if [ -n "$TARGET_IMAGE" ]; then
+        mayhem run . --file "$MAYHEMFILE" --duration "$MAYHEM_DURATION" --image "$TARGET_IMAGE"
+      else
+        mayhem run . --file "$MAYHEMFILE" --duration "$MAYHEM_DURATION"
+      fi
